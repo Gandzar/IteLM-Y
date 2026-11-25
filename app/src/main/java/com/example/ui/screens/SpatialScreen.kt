@@ -28,6 +28,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -36,6 +37,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -104,6 +106,7 @@ fun SpatialScreen(
     floatingNotice: String,
     modifier: Modifier = Modifier,
 ) {
+    CompositionLocalProvider(LocalContentColor provides TextPrimary) {
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -346,6 +349,7 @@ fun SpatialScreen(
                 }
             }
         }
+    }
     }
 }
 

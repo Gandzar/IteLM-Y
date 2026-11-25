@@ -14,26 +14,33 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 object MediaScraper {
-    const val SCRAPER_VERSION = "0.2.0-lite"
+    const val SCRAPER_VERSION = "0.3.0-innertube"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    private val directMediaRegex = Regex("\\.(mp3|m4a|wav|ogg|aac|flac|mp4|webm|mkv)(\\?.*)?$", RegexOption.IGNORE_CASE)
+    private val directMediaRegex = Regex("\\.(mp3|m4a|wav|ogg|opus|aac|flac|mp4|webm|mkv)(\\?.*)?$", RegexOption.IGNORE_CASE)
 
-    fun isDirectMediaUrl(url: String): Boolean = directMediaRegex.containsMatchIn(url.trim())
+    fun isDirectMediaUrl(url: String): Boolean {
+        val cleaned = url.trim()
+        return directMediaRegex.containsMatchIn(cleaned) ||
+            cleaned.contains("googlevideo.com/videoplayback", ignoreCase = true)
+    }
 
-    suspend fun scrapeUrl(url: String): ScrapeResult = withContext(Dispatchers.IO) {
+    suspend fun scrapeUrl(
+        url: String,
+        authHeaders: Map<String, String> = emptyMap(),
+    ): ScrapeResult = withContext(Dispatchers.IO) {
         val cleaned = url.trim()
         if (cleaned.isEmpty()) {
             return@withContext emptyResult(cleaned, PlatformId.UNKNOWN, "URL kosong")
         }
 
         if (isDirectMediaUrl(cleaned)) {
-            val ext = directMediaRegex.find(cleaned)?.groupValues?.getOrNull(1)?.lowercase() ?: "mp3"
-            val isAudio = ext in setOf("mp3", "m4a", "wav", "ogg", "aac", "flac")
+            val ext = directMediaRegex.find(cleaned)?.groupValues?.getOrNull(1)?.lowercase() ?: "m4a"
+            val isAudio = ext in setOf("mp3", "m4a", "wav", "ogg", "opus", "aac", "flac")
             val fileName = cleaned.substringAfterLast('/').substringBefore('?').ifBlank { "Direct Media" }
             return@withContext ScrapeResult(
                 status = true,
@@ -58,7 +65,7 @@ object MediaScraper {
 
         try {
             when (platform) {
-                PlatformId.YOUTUBE -> scrapeYoutube(cleaned)
+                PlatformId.YOUTUBE -> scrapeYoutube(cleaned, authHeaders)
                 PlatformId.TIKTOK -> scrapeTiktok(cleaned)
                 else -> scrapeGeneric(cleaned, platform, label)
             }
@@ -77,49 +84,88 @@ object MediaScraper {
         rawUrl = url,
     )
 
-    private fun scrapeYoutube(url: String): ScrapeResult {
+    private suspend fun scrapeYoutube(
+        url: String,
+        authHeaders: Map<String, String>,
+    ): ScrapeResult {
         val videoId = PlatformDetector.extractYoutubeId(url)
             ?: return emptyResult(url, PlatformId.YOUTUBE, "Video ID tidak ditemukan")
 
-        var title = "YouTube Video"
-        var author = ""
-        var thumbnail = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+        val resolved = runCatching {
+            InnerTubeClient.resolveStreams(videoId, authHeaders)
+        }.getOrNull()
 
-        runCatching {
-            val encoded = URLEncoder.encode("https://www.youtube.com/watch?v=$videoId", "UTF-8")
-            val req = Request.Builder()
-                .url("https://www.youtube.com/oembed?url=$encoded&format=json")
-                .header("User-Agent", "YMusic-Lite/0.2.0")
-                .build()
-            client.newCall(req).execute().use { res ->
-                if (res.isSuccessful) {
-                    val body = res.body?.string().orEmpty()
-                    if (body.isNotBlank()) {
-                        val json = JSONObject(body)
-                        title = json.optString("title", title).ifBlank { title }
-                        author = json.optString("author_name", "")
-                        thumbnail = json.optString("thumbnail_url", thumbnail).ifBlank { thumbnail }
+        var title = resolved?.title?.takeIf { it.isNotBlank() } ?: "YouTube Video"
+        var author = resolved?.author.orEmpty()
+        var thumbnail = resolved?.thumbnail?.takeIf { it.isNotBlank() }
+            ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+        val duration = resolved?.durationSec?.takeIf { it > 0 }
+
+        // Supplement metadata with oEmbed if InnerTube title is blank
+        if (title == "YouTube Video" || author.isBlank()) {
+            runCatching {
+                val encoded = URLEncoder.encode("https://www.youtube.com/watch?v=$videoId", "UTF-8")
+                val reqBuilder = Request.Builder()
+                    .url("https://www.youtube.com/oembed?url=$encoded&format=json")
+                    .header("User-Agent", "YMusic-Lite/0.3.0")
+                authHeaders.forEach { (k, v) ->
+                    if (k.isNotBlank() && v.isNotBlank()) reqBuilder.header(k, v)
+                }
+                client.newCall(reqBuilder.build()).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val body = res.body?.string().orEmpty()
+                        if (body.isNotBlank()) {
+                            val json = JSONObject(body)
+                            title = json.optString("title", title).ifBlank { title }
+                            if (author.isBlank()) author = json.optString("author_name", "")
+                            thumbnail = json.optString("thumbnail_url", thumbnail).ifBlank { thumbnail }
+                        }
                     }
                 }
             }
         }
 
-        val items = listOf(
-            MediaItem(
-                type = "video",
-                quality = "YouTube (buka di player)",
-                url = "https://www.youtube.com/watch?v=$videoId",
-                ext = "mp4",
-            ),
-        )
+        val items = buildList {
+            resolved?.audioStreams?.take(3)?.forEach { s ->
+                add(
+                    MediaItem(
+                        type = "audio",
+                        quality = s.qualityLabel,
+                        url = s.url,
+                        ext = s.ext,
+                    ),
+                )
+            }
+            resolved?.videoStreams?.take(3)?.forEach { s ->
+                add(
+                    MediaItem(
+                        type = "video",
+                        quality = s.qualityLabel,
+                        url = s.url,
+                        ext = s.ext,
+                    ),
+                )
+            }
+            if (isEmpty()) {
+                add(
+                    MediaItem(
+                        type = "video",
+                        quality = "YouTube (buka di player)",
+                        url = "https://www.youtube.com/watch?v=$videoId",
+                        ext = "mp4",
+                    ),
+                )
+            }
+        }
 
         return ScrapeResult(
             status = true,
             platform = PlatformId.YOUTUBE,
-            platformLabel = "YouTube",
+            platformLabel = if (url.contains("music.youtube.com", ignoreCase = true)) "YouTube Music" else "YouTube",
             title = title,
             author = author.ifBlank { null },
             thumbnail = thumbnail,
+            duration = duration,
             items = items,
             rawUrl = url,
         )

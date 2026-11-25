@@ -2,6 +2,7 @@ package com.example.engine
 
 import com.example.data.Track
 import com.example.data.TrackSource
+import com.example.data.YtPlaylist
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -14,10 +15,11 @@ data class EngineSearchResult(
     val tracks: List<Track>,
     val nextPageToken: String? = null,
     val isDemo: Boolean = false,
+    val isAuthenticated: Boolean = false,
 )
 
 object MusicSearchEngine {
-    const val ENGINE_VERSION = "0.2.0-lite"
+    const val ENGINE_VERSION = "0.3.0-innertube"
     private const val YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 
     private val client = OkHttpClient.Builder()
@@ -28,11 +30,26 @@ object MusicSearchEngine {
     suspend fun searchTracks(
         query: String,
         apiKey: String = "",
+        authHeaders: Map<String, String> = emptyMap(),
         maxResults: Int = 20,
     ): EngineSearchResult = withContext(Dispatchers.IO) {
         val q = query.trim()
         if (q.isEmpty()) return@withContext EngineSearchResult(emptyList())
 
+        // 1) Primary: YouTube Music InnerTube search (with SAPISIDHASH + cookies when logged in)
+        val ytMusicTracks = runCatching {
+            InnerTubeClient.searchMusic(query = q, authHeaders = authHeaders)
+        }.getOrDefault(emptyList())
+
+        if (ytMusicTracks.isNotEmpty()) {
+            return@withContext EngineSearchResult(
+                tracks = ytMusicTracks.take(maxResults),
+                isDemo = false,
+                isAuthenticated = authHeaders.isNotEmpty(),
+            )
+        }
+
+        // 2) Optional fallback: YouTube Data API v3 when API key is configured
         val key = apiKey.trim()
         if (key.isEmpty()) {
             return@withContext EngineSearchResult(demoTracks(q), isDemo = true)
@@ -41,8 +58,11 @@ object MusicSearchEngine {
         try {
             val encodedQ = URLEncoder.encode(q, "UTF-8")
             val url = "$YT_API_BASE/search?part=snippet&type=video&maxResults=$maxResults&q=$encodedQ&key=$key&videoCategoryId=10"
-            val req = Request.Builder().url(url).build()
-            client.newCall(req).execute().use { res ->
+            val reqBuilder = Request.Builder().url(url)
+            authHeaders.forEach { (k, v) ->
+                if (k.isNotBlank() && v.isNotBlank()) reqBuilder.header(k, v)
+            }
+            client.newCall(reqBuilder.build()).execute().use { res ->
                 if (!res.isSuccessful) {
                     return@withContext EngineSearchResult(demoTracks(q), isDemo = true)
                 }
@@ -85,6 +105,21 @@ object MusicSearchEngine {
             EngineSearchResult(demoTracks(q), isDemo = true)
         }
     }
+
+    suspend fun fetchLikedMusic(authHeaders: Map<String, String>): List<Track> =
+        InnerTubeClient.fetchLikedMusic(authHeaders)
+
+    suspend fun fetchLibrarySongs(authHeaders: Map<String, String>): List<Track> =
+        InnerTubeClient.fetchLibrarySongs(authHeaders)
+
+    suspend fun fetchUserPlaylists(authHeaders: Map<String, String>): List<YtPlaylist> =
+        InnerTubeClient.fetchUserPlaylists(authHeaders)
+
+    suspend fun fetchPlaylistTracks(browseId: String, authHeaders: Map<String, String>): List<Track> =
+        InnerTubeClient.fetchPlaylistTracks(browseId, authHeaders)
+
+    suspend fun fetchUserHistory(authHeaders: Map<String, String>): List<Track> =
+        InnerTubeClient.fetchUserHistory(authHeaders)
 
     private fun demoTracks(query: String): List<Track> = listOf(
         Track(

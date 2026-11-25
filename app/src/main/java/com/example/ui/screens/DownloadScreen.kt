@@ -71,14 +71,15 @@ import com.example.data.DownloadJob
 import com.example.data.DownloadStatus
 import com.example.data.MediaItem
 import com.example.data.ScrapeResult
-import com.example.ui.theme.AccentGreen
-import com.example.ui.theme.BgCard
-import com.example.ui.theme.BgElevated
-import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.DangerRed
-import com.example.ui.theme.TextMuted
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.YtCard
+import com.example.ui.theme.YtChipBg
+import com.example.ui.theme.YtDivider
+import com.example.ui.theme.YtElevated
+import com.example.ui.theme.YtOrange
+import com.example.ui.theme.YtTextMuted
+import com.example.ui.theme.YtTextPrimary
+import com.example.ui.theme.YtTextSecondary
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -112,8 +113,8 @@ fun DownloadScreen(
                     .widthIn(max = 640.dp)
                     .fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = BgCard),
-                border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+                colors = CardDefaults.cardColors(containerColor = YtCard),
+                border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
             ) {
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Image(
@@ -122,14 +123,14 @@ fun DownloadScreen(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .matchParentSize()
-                            .alpha(0.22f),
+                            .alpha(0.10f),
                     )
                     Box(
                         modifier = Modifier
                             .matchParentSize()
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(Color.Transparent, BgCard.copy(alpha = 0.92f)),
+                                    listOf(Color.Transparent, YtCard.copy(alpha = 0.94f)),
                                 ),
                             ),
                     )
@@ -137,13 +138,13 @@ fun DownloadScreen(
                         Text(
                             text = "All Downloader",
                             style = MaterialTheme.typography.headlineSmall,
-                            color = TextPrimary,
+                            color = YtTextPrimary,
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
                             text = "Paste link TikTok, YouTube, Instagram, X, Spotify, dll.",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = TextSecondary,
+                            color = YtTextSecondary,
                         )
                         Spacer(Modifier.height(16.dp))
 
@@ -154,17 +155,19 @@ fun DownloadScreen(
                             OutlinedTextField(
                                 value = urlInput,
                                 onValueChange = onUrlChange,
-                                placeholder = { Text("Tempel URL di sini…", color = TextMuted) },
+                                placeholder = { Text("Tempel URL di sini…", color = YtTextMuted) },
                                 singleLine = true,
                                 modifier = Modifier
                                     .weight(1f)
                                     .testTag("url_input"),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = AccentGreen,
-                                    unfocusedBorderColor = BorderSubtle,
-                                    focusedContainerColor = BgElevated.copy(alpha = 0.9f),
-                                    unfocusedContainerColor = BgElevated.copy(alpha = 0.9f),
+                                    focusedBorderColor = YtOrange,
+                                    unfocusedBorderColor = YtDivider,
+                                    focusedContainerColor = YtElevated,
+                                    unfocusedContainerColor = YtElevated,
+                                    focusedTextColor = YtTextPrimary,
+                                    unfocusedTextColor = YtTextPrimary,
                                 ),
                                 keyboardOptions = KeyboardOptions(
                                     keyboardType = KeyboardType.Uri,
@@ -179,7 +182,7 @@ fun DownloadScreen(
                                 trailingIcon = {
                                     if (urlInput.isNotEmpty()) {
                                         IconButton(onClick = { onUrlChange("") }) {
-                                            Icon(Icons.Default.Clear, contentDescription = "Hapus URL", tint = TextMuted)
+                                            Icon(Icons.Default.Clear, contentDescription = "Hapus URL", tint = YtTextMuted)
                                         }
                                     }
                                 },
@@ -187,8 +190,8 @@ fun DownloadScreen(
 
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = BgElevated,
-                                border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+                                color = YtElevated,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
                             ) {
                                 IconButton(
                                     onClick = {
@@ -208,7 +211,7 @@ fun DownloadScreen(
                                     Icon(
                                         imageVector = Icons.Default.ContentPaste,
                                         contentDescription = "Tempel dari clipboard",
-                                        tint = TextSecondary,
+                                        tint = YtTextSecondary,
                                     )
                                 }
                             }
@@ -228,15 +231,15 @@ fun DownloadScreen(
                                 .testTag("scrape_download_btn"),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = AccentGreen,
-                                contentColor = Color(0xFF041409),
+                                containerColor = YtOrange,
+                                contentColor = Color.White,
                             ),
                         ) {
                             if (scrapeBusy) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(18.dp),
                                     strokeWidth = 2.dp,
-                                    color = Color(0xFF041409),
+                                    color = Color.White,
                                 )
                                 Spacer(Modifier.width(10.dp))
                                 Text("Memproses…", fontWeight = FontWeight.Bold)
@@ -257,14 +260,14 @@ fun DownloadScreen(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(999.dp))
-                                        .background(BgElevated.copy(alpha = 0.9f))
-                                        .border(1.dp, BorderSubtle, RoundedCornerShape(999.dp))
+                                        .background(YtChipBg)
+                                        .border(1.dp, YtDivider, RoundedCornerShape(999.dp))
                                         .padding(horizontal = 10.dp, vertical = 5.dp),
                                 ) {
                                     Text(
                                         text = label,
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = TextMuted,
+                                        color = YtTextSecondary,
                                     )
                                 }
                             }
@@ -299,9 +302,10 @@ fun DownloadScreen(
                     Text(
                         text = "Antrean Download (${downloadJobs.size})",
                         style = MaterialTheme.typography.titleMedium,
+                        color = YtTextPrimary,
                     )
                     TextButton(onClick = onClearFinishedJobs) {
-                        Text("Bersihkan", color = AccentGreen)
+                        Text("Bersihkan", color = YtOrange)
                     }
                 }
             }
@@ -328,8 +332,8 @@ private fun ScrapeResultCard(
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = BgCard),
-        border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+        colors = CardDefaults.cardColors(containerColor = YtCard),
+        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             if (!result.thumbnail.isNullOrBlank()) {
@@ -341,7 +345,7 @@ private fun ScrapeResultCard(
                         .fillMaxWidth()
                         .height(180.dp)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(BgElevated),
+                        .background(YtElevated),
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -349,19 +353,20 @@ private fun ScrapeResultCard(
             Text(
                 text = result.platformLabel.uppercase(),
                 style = MaterialTheme.typography.labelMedium,
-                color = AccentGreen,
+                color = YtOrange,
             )
             Spacer(Modifier.height(4.dp))
             Text(
                 text = result.title.ifBlank { "(tanpa judul)" },
                 style = MaterialTheme.typography.titleMedium,
+                color = YtTextPrimary,
             )
             if (!result.author.isNullOrBlank()) {
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = result.author,
                     style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                    color = YtTextSecondary,
                 )
             }
             if (!result.error.isNullOrBlank()) {
@@ -385,13 +390,13 @@ private fun ScrapeResultCard(
                         .padding(vertical = 3.dp)
                         .testTag("scrape_item_btn_$idx"),
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
                 ) {
-                    Icon(Icons.Default.Download, contentDescription = null, tint = AccentGreen, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Download, contentDescription = null, tint = YtOrange, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = "${item.type.uppercase()}$qualityText$extText",
-                        color = TextPrimary,
+                        color = YtTextPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -411,11 +416,11 @@ private fun ScrapeResultCard(
                             .weight(1f)
                             .testTag("scrape_save_library_btn"),
                         shape = RoundedCornerShape(10.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
                     ) {
-                        Icon(Icons.Default.LibraryAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.LibraryAdd, contentDescription = null, tint = YtTextPrimary, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Library", maxLines = 1)
+                        Text("Library", color = YtTextPrimary, maxLines = 1)
                     }
                     Button(
                         onClick = onPlay,
@@ -423,7 +428,7 @@ private fun ScrapeResultCard(
                             .weight(1f)
                             .testTag("scrape_play_btn"),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen, contentColor = Color(0xFF041409)),
+                        colors = ButtonDefaults.buttonColors(containerColor = YtOrange, contentColor = Color.White),
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
@@ -444,8 +449,8 @@ private fun DownloadJobRow(
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.cardColors(containerColor = BgCard),
-        border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+        colors = CardDefaults.cardColors(containerColor = YtCard),
+        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -453,6 +458,7 @@ private fun DownloadJobRow(
                     Text(
                         text = job.track.title,
                         style = MaterialTheme.typography.titleSmall,
+                        color = YtTextPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -467,7 +473,7 @@ private fun DownloadJobRow(
                             }
                         }",
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (job.status == DownloadStatus.ERROR) DangerRed else TextSecondary,
+                        color = if (job.status == DownloadStatus.ERROR) DangerRed else YtTextSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -476,7 +482,7 @@ private fun DownloadJobRow(
                     onClick = onRemove,
                     modifier = Modifier.minimumInteractiveComponentSize(),
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "Hapus unduhan", tint = TextMuted)
+                    Icon(Icons.Default.Close, contentDescription = "Hapus unduhan", tint = YtTextMuted)
                 }
             }
             if (job.status == DownloadStatus.DOWNLOADING || job.status == DownloadStatus.CONVERTING) {
@@ -487,8 +493,8 @@ private fun DownloadJobRow(
                         .fillMaxWidth()
                         .height(4.dp)
                         .clip(RoundedCornerShape(2.dp)),
-                    color = AccentGreen,
-                    trackColor = BorderSubtle,
+                    color = YtOrange,
+                    trackColor = YtDivider,
                 )
             }
             if (!job.error.isNullOrBlank()) {

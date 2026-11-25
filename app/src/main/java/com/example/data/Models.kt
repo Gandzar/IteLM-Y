@@ -19,6 +19,10 @@ data class Track(
     val source: TrackSource = TrackSource.YOUTUBE,
     val url: String? = null,
     val videoId: String? = null,
+    val badgeText: String = "",
+    val subtitle: String = "",
+    val isMix: Boolean = false,
+    val playlistBrowseId: String? = null,
 )
 
 @Serializable
@@ -141,11 +145,83 @@ data class EngineMeta(
     val size: Int,
 )
 
-enum class AppTab(val route: String) {
-    DOWNLOAD("download"),
-    SEARCH("search"),
-    SPATIAL("spatial"),
-    LIBRARY("library"),
-    HISTORY("history"),
-    SETTINGS("settings"),
+enum class AppTab(val route: String, val title: String, val isPrimaryTab: Boolean) {
+    HOME("home", "Beranda", true),
+    TRENDING("trending", "Musik trending", true),
+    RECOMMENDED("recommended", "Rekomendasi", true),
+    TOP_SONGS("top_songs", "Lagu teratas", true),
+    LIBRARY("library", "Perpustakaan", true),
+    SEARCH("search", "Cari", false),
+    DOWNLOAD("download", "All Downloader", false),
+    SPATIAL("spatial", "Spatial 8D", false),
+    HISTORY("history", "Riwayat", false),
+    SETTINGS("settings", "Pengaturan", false),
+}
+
+enum class HomeChip(val label: String, val queryHint: String?) {
+    ALL("Semua", null),
+    MUSIC("Musik", "musik mix hits indonesia"),
+    MIX("Mix", "mix playlist dj music"),
+    LIVE("Live", "live music performance session"),
+    CARTOON("Kartun", "anime ost music video"),
+    NATURE("Alam", "relaxing nature ambient music"),
+}
+
+enum class LibrarySubView {
+    OVERVIEW,
+    LOCAL,
+    LIKED_MUSIC,
+    PLAYLISTS,
+}
+
+@Serializable
+data class AccountProfile(
+    val isLoggedIn: Boolean = false,
+    val name: String = "",
+    val handle: String = "",
+    val avatarUrl: String = "",
+    val lastSyncedAt: Long = 0L,
+)
+
+@Serializable
+data class YtPlaylist(
+    val id: String,
+    val browseId: String,
+    val title: String,
+    val subtitle: String = "",
+    val trackCount: String = "",
+    val thumbnail: String = "",
+)
+
+data class StreamCandidate(
+    val url: String,
+    val mimeType: String,
+    val ext: String,
+    val bitrate: Int = 0,
+    val qualityLabel: String = "",
+    val isAudio: Boolean = true,
+    val userAgent: String = "",
+)
+
+data class ResolvedStreams(
+    val videoId: String,
+    val title: String = "",
+    val author: String = "",
+    val durationSec: Int = 0,
+    val thumbnail: String = "",
+    val audioStreams: List<StreamCandidate> = emptyList(),
+    val videoStreams: List<StreamCandidate> = emptyList(),
+    val bestAudio: StreamCandidate? = null,
+    val bestVideo: StreamCandidate? = null,
+)
+
+enum class LibrarySection(val label: String) {
+    LOCAL("Lokal"),
+    LIKED_MUSIC("Liked Music"),
+    PLAYLISTS("Playlist"),
+}
+
+enum class HistorySection(val label: String) {
+    SCRAPE("Scrape"),
+    YOUTUBE_MUSIC("YT Music"),
 }

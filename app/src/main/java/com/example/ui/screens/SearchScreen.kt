@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
@@ -30,12 +29,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.data.Track
 import com.example.ui.components.EmptyStateView
-import com.example.ui.components.TrackRowItem
-import com.example.ui.theme.AccentGreen
-import com.example.ui.theme.BgElevated
-import com.example.ui.theme.BorderSubtle
-import com.example.ui.theme.TextMuted
-import com.example.ui.theme.TextSecondary
+import com.example.ui.components.YouTubeFeedRowItem
+import com.example.ui.theme.YtDivider
+import com.example.ui.theme.YtElevated
+import com.example.ui.theme.YtOrange
+import com.example.ui.theme.YtTextMuted
+import com.example.ui.theme.YtTextPrimary
+import com.example.ui.theme.YtTextSecondary
 
 @Composable
 fun SearchScreen(
@@ -55,25 +55,27 @@ fun SearchScreen(
         OutlinedTextField(
             value = query,
             onValueChange = onQueryChange,
-            placeholder = { Text("Cari lagu di YouTube…", color = TextMuted) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextMuted) },
+            placeholder = { Text("Cari lagu atau video di YouTube…", color = YtTextMuted) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = YtTextMuted) },
             trailingIcon = {
                 if (query.isNotEmpty()) {
                     IconButton(onClick = { onQueryChange("") }) {
-                        Icon(Icons.Default.Clear, contentDescription = "Bersihkan", tint = TextMuted)
+                        Icon(Icons.Default.Clear, contentDescription = "Bersihkan", tint = YtTextMuted)
                     }
                 }
             },
             singleLine = true,
             shape = RoundedCornerShape(999.dp),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = AccentGreen,
-                unfocusedBorderColor = BorderSubtle,
-                focusedContainerColor = BgElevated,
-                unfocusedContainerColor = BgElevated,
+                focusedBorderColor = YtOrange,
+                unfocusedBorderColor = YtDivider,
+                focusedContainerColor = YtElevated,
+                unfocusedContainerColor = YtElevated,
+                focusedTextColor = YtTextPrimary,
+                unfocusedTextColor = YtTextPrimary,
             ),
             modifier = Modifier
-                .widthIn(max = 640.dp)
+                .widthIn(max = 720.dp)
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 10.dp)
                 .testTag("search_input"),
@@ -81,7 +83,7 @@ fun SearchScreen(
 
         if (isSearching) {
             Spacer(Modifier.height(32.dp))
-            CircularProgressIndicator(color = AccentGreen)
+            CircularProgressIndicator(color = YtOrange)
         } else if (results.isEmpty()) {
             EmptyStateView(
                 icon = Icons.Default.Search,
@@ -91,35 +93,34 @@ fun SearchScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                contentPadding = PaddingValues(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (isDemo) {
                     item {
                         Surface(
                             shape = RoundedCornerShape(10.dp),
-                            color = BgElevated,
+                            color = YtElevated,
                             modifier = Modifier
-                                .widthIn(max = 640.dp)
+                                .widthIn(max = 720.dp)
                                 .fillMaxWidth()
-                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                                .padding(horizontal = 14.dp, vertical = 4.dp),
                         ) {
                             Text(
-                                text = "Mode demo (atur YouTube API Key opsional di Settings untuk hasil pencarian langsung).",
+                                text = "Mode offline/demo (pencarian YouTube Music tidak terjangkau, atau atur YouTube API Key cadangan di Pengaturan).",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
+                                color = YtTextSecondary,
                                 modifier = Modifier.padding(10.dp),
                             )
                         }
                     }
                 }
                 items(results, key = { it.id }) { track ->
-                    TrackRowItem(
+                    YouTubeFeedRowItem(
                         track = track,
                         onPlay = { onPlayTrack(track) },
                         onMore = { onMoreTrack(track) },
-                        modifier = Modifier.widthIn(max = 640.dp),
+                        modifier = Modifier.widthIn(max = 720.dp),
                     )
                 }
             }

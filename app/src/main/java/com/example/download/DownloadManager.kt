@@ -10,6 +10,7 @@ import com.example.data.DownloadFormat
 import com.example.data.DownloadJob
 import com.example.data.DownloadStatus
 import com.example.data.Track
+import com.example.engine.InnerTubeClient
 import com.example.engine.MediaScraper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,7 @@ import java.util.concurrent.TimeUnit
 class DownloadManager(
     private val context: Context,
     private val repository: AppRepository,
+    private val authHeadersProvider: () -> Map<String, String> = { emptyMap() },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = OkHttpClient.Builder()
@@ -62,18 +64,35 @@ class DownloadManager(
     private suspend fun processJob(jobId: String, track: Track, format: DownloadFormat) {
         updateSingle(jobId) { it.copy(status = DownloadStatus.DOWNLOADING, progress = 5) }
 
-        val targetUrl = track.url?.takeIf { it.isNotBlank() && MediaScraper.isDirectMediaUrl(it) }
-        if (targetUrl == null) {
-            for (p in 15..70 step 15) {
-                delay(220)
-                if (_jobs.value.none { it.id == jobId }) return
-                updateSingle(jobId) { it.copy(progress = p) }
+        var targetUrl = track.url?.takeIf { it.isNotBlank() && MediaScraper.isDirectMediaUrl(it) }
+        var userAgent = "YMusic-Lite/0.3.0"
+        var actualExt = format.ext
+
+        // Resolve via InnerTube when track is a YouTube/YT Music item without direct stream URL
+        if (targetUrl == null && !track.videoId.isNullOrBlank()) {
+            val resolved = runCatching {
+                InnerTubeClient.resolveStreams(track.videoId, authHeadersProvider())
+            }.getOrNull()
+            val candidate = if (format == DownloadFormat.MP3) {
+                resolved?.bestAudio
+            } else {
+                resolved?.videoStreams?.firstOrNull { !it.qualityLabel.contains("video-only") }
+                    ?: resolved?.bestVideo
+                    ?: resolved?.bestAudio
             }
+            if (candidate != null) {
+                targetUrl = candidate.url
+                if (candidate.userAgent.isNotBlank()) userAgent = candidate.userAgent
+                actualExt = candidate.ext
+            }
+        }
+
+        if (targetUrl == null) {
             updateSingle(jobId) {
                 it.copy(
                     status = DownloadStatus.ERROR,
                     progress = 0,
-                    error = "Stream URL belum tersedia. Engine bawaan hanya mendukung tautan media langsung (.mp3/.mp4/.m4a/.wav).",
+                    error = "Stream URL belum tersedia untuk video ini. Coba login akun Google atau tempel URL media langsung.",
                 )
             }
             return
@@ -82,7 +101,7 @@ class DownloadManager(
         try {
             val req = Request.Builder()
                 .url(targetUrl)
-                .header("User-Agent", "YMusic-Lite/0.2.0")
+                .header("User-Agent", userAgent)
                 .build()
 
             client.newCall(req).execute().use { res ->
@@ -91,13 +110,21 @@ class DownloadManager(
                 }
                 val body = res.body ?: throw IllegalStateException("Respons kosong")
                 val contentLength = body.contentLength()
-                val fileName = sanitizeFileName("${track.artist} - ${track.title}.${format.ext}")
+                val fileName = sanitizeFileName("${track.artist} - ${track.title}.$actualExt")
                 val folder = repository.getSettings().downloadFolder.ifBlank { "YMusicLite" }
+
+                val mimeType = when (actualExt.lowercase()) {
+                    "m4a", "aac" -> "audio/mp4"
+                    "opus", "ogg" -> "audio/ogg"
+                    "mp3" -> "audio/mpeg"
+                    "wav" -> "audio/wav"
+                    else -> "video/mp4"
+                }
 
                 val savedPath = saveStream(
                     fileName = fileName,
                     folder = folder,
-                    mimeType = if (format == DownloadFormat.MP3) "audio/mpeg" else "video/mp4",
+                    mimeType = mimeType,
                 ) { outStream ->
                     body.byteStream().use { input ->
                         val buffer = ByteArray(8192)
@@ -120,7 +147,7 @@ class DownloadManager(
                 }
 
                 updateSingle(jobId) { it.copy(status = DownloadStatus.CONVERTING, progress = 96) }
-                delay(180)
+                delay(150)
                 updateSingle(jobId) {
                     it.copy(
                         status = DownloadStatus.DONE,

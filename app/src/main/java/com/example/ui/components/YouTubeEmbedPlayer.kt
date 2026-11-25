@@ -3,11 +3,14 @@ package com.example.ui.components
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.view.View
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,11 +23,13 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -36,25 +41,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.player.YMusicPlayer
-import com.example.ui.theme.BgElevated
-import com.example.ui.theme.BorderSubtle
-import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.YtCard
+import com.example.ui.theme.YtDivider
+import com.example.ui.theme.YtOrange
+import com.example.ui.theme.YtTextSecondary
+import kotlin.math.roundToInt
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun YouTubeEmbedOverlay(
     videoId: String,
+    initialSeekSec: Float,
     expanded: Boolean,
     player: YMusicPlayer,
+    onSwitchToAudio: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    val safeVideoId = remember(videoId) { sanitizeVideoId(videoId) }
 
-    DisposableEffect(videoId, player) {
+    DisposableEffect(safeVideoId, player) {
         player.onYoutubeToggle = {
             webViewRef?.evaluateJavascript(
                 "if (window.ytPlayer) { if (ytPlayer.getPlayerState() === 1) ytPlayer.pauseVideo(); else ytPlayer.playVideo(); }",
@@ -69,7 +80,7 @@ fun YouTubeEmbedOverlay(
         }
         player.onYoutubeSeek = { sec ->
             webViewRef?.evaluateJavascript(
-                "if (window.ytPlayer) ytPlayer.seekTo($sec, true);",
+                "if (window.ytPlayer) ytPlayer.seekTo(${sec.coerceAtLeast(0f)}, true);",
                 null,
             )
         }
@@ -82,17 +93,17 @@ fun YouTubeEmbedOverlay(
         }
     }
 
-    if (!expanded) return
+    if (!expanded || safeVideoId == null) return
 
     Surface(
         modifier = modifier
-            .widthIn(max = 340.dp)
+            .widthIn(max = 360.dp)
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp),
         shape = RoundedCornerShape(14.dp),
-        color = BgElevated,
+        color = YtCard,
         tonalElevation = 6.dp,
-        border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
     ) {
         Column {
             Row(
@@ -103,26 +114,40 @@ fun YouTubeEmbedOverlay(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = "YouTube Player",
+                    text = "YouTube Video",
                     style = MaterialTheme.typography.labelMedium,
-                    color = TextSecondary,
+                    color = YtTextSecondary,
                 )
-                IconButton(
-                    onClick = {
-                        runCatching {
-                            val intent = Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://www.youtube.com/watch?v=$videoId"),
-                            )
-                            context.startActivity(intent)
-                        }
-                    },
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                        contentDescription = "Buka di YouTube",
-                        tint = TextSecondary,
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = onSwitchToAudio,
+                        modifier = Modifier.testTag("yt_overlay_switch_audio_btn"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Headphones,
+                            contentDescription = null,
+                            tint = YtOrange,
+                            modifier = Modifier.padding(end = 4.dp),
+                        )
+                        Text("Audio 8D", color = YtOrange, style = MaterialTheme.typography.labelMedium)
+                    }
+                    IconButton(
+                        onClick = {
+                            runCatching {
+                                val intent = Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://www.youtube.com/watch?v=$safeVideoId"),
+                                )
+                                context.startActivity(intent)
+                            }
+                        },
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = "Buka di YouTube",
+                            tint = YtTextSecondary,
+                        )
+                    }
                 }
             }
             Box(
@@ -135,12 +160,21 @@ fun YouTubeEmbedOverlay(
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             settings.mediaPlaybackRequiresUserGesture = false
                             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                             webChromeClient = WebChromeClient()
-                            webViewClient = WebViewClient()
+                            webViewClient = object : WebViewClient() {
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?,
+                                ): Boolean {
+                                    view?.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                                    return true
+                                }
+                            }
                             addJavascriptInterface(
                                 object {
                                     @JavascriptInterface
@@ -152,9 +186,10 @@ fun YouTubeEmbedOverlay(
                                 },
                                 "AndroidBridge",
                             )
+                            tag = safeVideoId
                             loadDataWithBaseURL(
                                 "https://www.youtube.com",
-                                buildYoutubeHtml(videoId),
+                                buildYoutubeHtml(safeVideoId, initialSeekSec.roundToInt().coerceAtLeast(0)),
                                 "text/html",
                                 "utf-8",
                                 null,
@@ -163,25 +198,37 @@ fun YouTubeEmbedOverlay(
                         }
                     },
                     update = { wv ->
-                        if (wv.tag != videoId) {
-                            wv.tag = videoId
+                        if (wv.tag != safeVideoId) {
+                            wv.tag = safeVideoId
                             wv.loadDataWithBaseURL(
                                 "https://www.youtube.com",
-                                buildYoutubeHtml(videoId),
+                                buildYoutubeHtml(safeVideoId, initialSeekSec.roundToInt().coerceAtLeast(0)),
                                 "text/html",
                                 "utf-8",
                                 null,
                             )
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().height(176.dp),
+                    onRelease = { wv ->
+                        wv.stopLoading()
+                        wv.destroy()
+                        if (webViewRef == wv) webViewRef = null
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(176.dp),
                 )
             }
         }
     }
 }
 
-private fun buildYoutubeHtml(videoId: String): String = """
+private fun sanitizeVideoId(raw: String): String? {
+    val trimmed = raw.trim()
+    return trimmed.takeIf { Regex("^[A-Za-z0-9_-]{6,20}$").matches(it) }
+}
+
+private fun buildYoutubeHtml(videoId: String, startSeconds: Int): String = """
     <!DOCTYPE html>
     <html>
     <head>
@@ -196,7 +243,7 @@ private fun buildYoutubeHtml(videoId: String): String = """
         function onYouTubeIframeAPIReady() {
           ytPlayer = new YT.Player('player', {
             videoId: '$videoId',
-            playerVars: { autoplay: 1, controls: 1, modestbranding: 1, rel: 0, playsinline: 1 },
+            playerVars: { autoplay: 1, start: $startSeconds, controls: 1, modestbranding: 1, rel: 0, playsinline: 1 },
             events: {
               onReady: function(e) {
                 setInterval(function() {

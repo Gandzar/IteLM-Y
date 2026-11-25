@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AllInclusive
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LibraryAdd
@@ -32,25 +34,151 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.DownloadFormat
 import com.example.data.Track
-import com.example.ui.theme.AccentGreen
-import com.example.ui.theme.BgElevated
-import com.example.ui.theme.BgHover
-import com.example.ui.theme.TextMuted
-import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.YtBadgeScrim
+import com.example.ui.theme.YtCard
+import com.example.ui.theme.YtElevated
+import com.example.ui.theme.YtOrange
+import com.example.ui.theme.YtTextMuted
+import com.example.ui.theme.YtTextPrimary
+import com.example.ui.theme.YtTextSecondary
 
 fun formatDuration(seconds: Int): String {
     if (seconds <= 0) return ""
     val m = seconds / 60
     val s = seconds % 60
-    return "$m:${s.toString().padStart(2, '0')}"
+    return "$m.${s.toString().padStart(2, '0')}"
+}
+
+@Composable
+fun YouTubeFeedRowItem(
+    track: Track,
+    onPlay: () -> Unit,
+    onMore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val durText = track.badgeText.ifBlank { formatDuration(track.duration) }
+    val metaLine = track.subtitle.ifBlank { track.artist }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onPlay)
+            .padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp)
+            .testTag("yt_feed_item_${track.id}"),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(152.dp)
+                .height(86.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(YtElevated),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (track.thumbnail.isNotBlank()) {
+                AsyncImage(
+                    model = track.thumbnail,
+                    contentDescription = track.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.MusicNote,
+                    contentDescription = null,
+                    tint = YtTextMuted,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
+
+            if (track.isMix || durText.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(5.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(YtBadgeScrim)
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    if (track.isMix) {
+                        Icon(
+                            imageVector = Icons.Default.AllInclusive,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Text(
+                            text = durText.ifBlank { "Mix" },
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    } else {
+                        Text(
+                            text = durText,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(top = 2.dp),
+        ) {
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+                color = YtTextPrimary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (metaLine.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = metaLine,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        IconButton(
+            onClick = onMore,
+            modifier = Modifier
+                .minimumInteractiveComponentSize()
+                .testTag("track_more_${track.id}"),
+        ) {
+            Icon(
+                imageVector = Icons.Default.MoreVert,
+                contentDescription = "Opsi lagu",
+                tint = YtTextMuted,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
 }
 
 @Composable
@@ -74,7 +202,7 @@ fun TrackRowItem(
             modifier = Modifier
                 .size(48.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .background(BgElevated),
+                .background(YtElevated),
             contentAlignment = Alignment.Center,
         ) {
             if (track.thumbnail.isNotBlank()) {
@@ -88,7 +216,7 @@ fun TrackRowItem(
                 Icon(
                     imageVector = Icons.Default.MusicNote,
                     contentDescription = null,
-                    tint = TextMuted,
+                    tint = YtTextMuted,
                     modifier = Modifier.size(22.dp),
                 )
             }
@@ -98,7 +226,7 @@ fun TrackRowItem(
             Text(
                 text = track.title,
                 style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = YtTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -107,7 +235,7 @@ fun TrackRowItem(
             Text(
                 text = if (dur.isNotEmpty()) "${track.artist} · $dur" else track.artist,
                 style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                color = YtTextSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -122,7 +250,7 @@ fun TrackRowItem(
             Icon(
                 imageVector = Icons.Default.MoreVert,
                 contentDescription = "Opsi lagu",
-                tint = TextSecondary,
+                tint = YtTextMuted,
             )
         }
     }
@@ -140,8 +268,8 @@ fun TrackOptionsBottomSheet(
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = BgElevated,
-        contentColor = MaterialTheme.colorScheme.onSurface,
+        containerColor = YtCard,
+        contentColor = YtTextPrimary,
     ) {
         Column(
             modifier = Modifier
@@ -153,6 +281,7 @@ fun TrackOptionsBottomSheet(
             Text(
                 text = track.title,
                 style = MaterialTheme.typography.titleMedium,
+                color = YtTextPrimary,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -160,7 +289,7 @@ fun TrackOptionsBottomSheet(
             Text(
                 text = track.artist,
                 style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                color = YtTextSecondary,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
             )
             Spacer(Modifier.height(12.dp))
@@ -168,7 +297,7 @@ fun TrackOptionsBottomSheet(
             SheetActionRow(
                 icon = Icons.Default.PlayArrow,
                 label = "Putar",
-                tint = AccentGreen,
+                tint = YtOrange,
                 onClick = {
                     onPlay()
                     onDismiss()
@@ -210,7 +339,7 @@ fun TrackOptionsBottomSheet(
 private fun SheetActionRow(
     icon: ImageVector,
     label: String,
-    tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+    tint: Color = YtTextPrimary,
     testTag: String,
     onClick: () -> Unit,
 ) {
@@ -246,23 +375,23 @@ fun EmptyStateView(
             modifier = Modifier
                 .size(56.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(BgHover),
+                .background(YtElevated),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = null, tint = TextMuted, modifier = Modifier.size(28.dp))
+            Icon(icon, contentDescription = null, tint = YtTextMuted, modifier = Modifier.size(28.dp))
         }
         Spacer(Modifier.height(14.dp))
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,
-            color = TextSecondary,
+            color = YtTextSecondary,
         )
         if (!subtitle.isNullOrBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
+                color = YtTextMuted,
             )
         }
     }
