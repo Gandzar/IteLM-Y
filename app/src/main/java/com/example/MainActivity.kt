@@ -7,6 +7,7 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import com.example.share.ShareQuickSaveActivity
 import com.example.ui.MainViewModel
 import com.example.ui.YMusicApp
 import com.example.ui.theme.YMusicLiteTheme
@@ -27,7 +28,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
 
-        handleSendIntent(intent)
+        handleAppIntent(intent)
 
         setContent {
             YMusicLiteTheme {
@@ -39,15 +40,24 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleSendIntent(intent)
+        handleAppIntent(intent)
     }
 
-    private fun handleSendIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+    private fun handleAppIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (!sharedText.isNullOrBlank()) {
-                mainViewModel.handleSharedText(sharedText)
+                startActivity(
+                    Intent(this, ShareQuickSaveActivity::class.java).apply {
+                        action = Intent.ACTION_SEND
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, sharedText)
+                    },
+                )
             }
+            return
         }
+        mainViewModel.handleNotificationIntent(intent)
     }
 }

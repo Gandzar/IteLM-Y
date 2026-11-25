@@ -5,32 +5,54 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.YMusicApplication
 import com.example.auth.YouTubeAuthManager
 import com.example.data.AccountProfile
 import com.example.data.AppRepository
 import com.example.data.AppSettings
 import com.example.data.AppTab
+import com.example.data.CommentsPageResult
 import com.example.data.DownloadFormat
 import com.example.data.DownloadJob
+import com.example.data.DownloadStatus
 import com.example.data.EngineMeta
 import com.example.data.HistorySection
 import com.example.data.HomeChip
 import com.example.data.LibrarySection
 import com.example.data.LibrarySubView
+import com.example.data.LyricsState
 import com.example.data.MediaItem
+import com.example.data.PreviewKind
+import com.example.data.PreviewTarget
+import com.example.data.QualityPickerRequest
 import com.example.data.ReleaseInfo
+import com.example.data.ResolvedStreams
 import com.example.data.ScrapeResult
+import com.example.data.ScraperServer
+import com.example.data.ScraperServerKind
 import com.example.data.ScraprMeta
 import com.example.data.ScraprUpdateInfo
+import com.example.data.ServerStatus
+import com.example.data.StreamCandidate
 import com.example.data.Track
+import com.example.data.TrackSource
 import com.example.data.YtPlaylist
+import com.example.debug.AppDiagnostics
 import com.example.download.DownloadManager
 import com.example.engine.InnerTubeClient
+import com.example.engine.InnerTubeSocialClient
 import com.example.engine.MediaScraper
 import com.example.engine.MusicSearchEngine
+import com.example.engine.PlatformDetector
+import com.example.engine.ServerManager
+import com.example.notify.AppNotifications
 import com.example.player.PlayerState
 import com.example.player.YMusicPlayer
+import com.example.share.ShareHelper
 import dev.bagja.spatialaudio.audio.SpatialHostBridge
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -45,11 +67,12 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val app = application as YMusicApplication
     private val appContext = application.applicationContext
-    val authManager = YouTubeAuthManager(appContext)
-    val repository = AppRepository(appContext)
-    val player = YMusicPlayer(appContext) { authManager.buildAuthHeaders() }
-    val downloadManager = DownloadManager(appContext, repository) { authManager.buildAuthHeaders() }
+    val authManager: YouTubeAuthManager = app.authManager
+    val repository: AppRepository = app.repository
+    val player: YMusicPlayer = app.player
+    val downloadManager: DownloadManager = app.downloadManager
 
     private val _currentTab = MutableStateFlow(AppTab.HOME)
     val currentTab: StateFlow<AppTab> = _currentTab.asStateFlow()
@@ -186,14 +209,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _sheetTrack = MutableStateFlow<Track?>(null)
     val sheetTrack: StateFlow<Track?> = _sheetTrack.asStateFlow()
 
+    private val _previewTarget = MutableStateFlow<PreviewTarget?>(null)
+    val previewTarget: StateFlow<PreviewTarget?> = _previewTarget.asStateFlow()
+
+    // Server Menu state
+    private val _serverStatuses = MutableStateFlow<Map<String, ScraperServer>>(emptyMap())
+    val serverStatuses: StateFlow<Map<String, ScraperServer>> = _serverStatuses.asStateFlow()
+
+    private val _pingingServers = MutableStateFlow(false)
+    val pingingServers: StateFlow<Boolean> = _pingingServers.asStateFlow()
+
+    // Quality & MB Picker state
+    data class QualityPickerUiState(
+        val request: QualityPickerRequest,
+        val title: String,
+        val subtitle: String,
+        val thumbnail: String,
+        val resolvedStreams: ResolvedStreams? = null,
+        val scrapeResult: ScrapeResult? = null,
+        val isLoading: Boolean = true,
+        val errorMessage: String? = null,
+    )
+
+    private val _qualityPickerState = MutableStateFlow<QualityPickerUiState?>(null)
+    val qualityPickerState: StateFlow<QualityPickerUiState?> = _qualityPickerState.asStateFlow()
+
+    // Full-screen Now Playing sheet & YouTube Social / Lyrics state
+    private val _nowPlayingOpen = MutableStateFlow(false)
+    val nowPlayingOpen: StateFlow<Boolean> = _nowPlayingOpen.asStateFlow()
+
+    private val _commentsVideoId = MutableStateFlow<String?>(null)
+    private val _commentsState = MutableStateFlow(CommentsPageResult())
+    val commentsState: StateFlow<CommentsPageResult> = _commentsState.asStateFlow()
+
+    private val _commentsLoading = MutableStateFlow(false)
+    val commentsLoading: StateFlow<Boolean> = _commentsLoading.asStateFlow()
+
+    private val _commentPosting = MutableStateFlow(false)
+    val commentPosting: StateFlow<Boolean> = _commentPosting.asStateFlow()
+
+    private val _lyricsState = MutableStateFlow(LyricsState())
+    val lyricsState: StateFlow<LyricsState> = _lyricsState.asStateFlow()
+
     private val _toastMessage = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toastMessage: SharedFlow<String> = _toastMessage.asSharedFlow()
 
     private var searchJob: Job? = null
+    private var qualityPickerJob: Job? = null
 
     init {
         SpatialHostBridge.onSharedText = { text ->
             handleSharedText(text)
+        }
+        viewModelScope.launch {
+            app.globalToast.collect { msg ->
+                _toastMessage.tryEmit(msg)
+            }
         }
         viewModelScope.launch {
             val s = repository.settingsFlow.first()
@@ -536,13 +607,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _scrapeBusy.value = true
             try {
-                val result = MediaScraper.scrapeUrl(url, authManager.buildAuthHeaders())
+                val activeSrv = getActiveServer()
+                val result = MediaScraper.scrapeUrl(url, authManager.buildAuthHeaders(), activeSrv)
                 _lastScrape.value = result
                 if (result.status) {
                     val updated = (listOf(result) + history.value).take(50)
                     repository.saveHistory(updated)
                 }
-                emitToast(if (result.status) "Berhasil" else (result.error ?: "Gagal"))
+                emitToast(if (result.status) "Berhasil (${activeSrv.name})" else (result.error ?: "Gagal"))
             } catch (e: Exception) {
                 emitToast(e.message ?: "Error")
             } finally {
@@ -574,7 +646,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 DownloadFormat.MP4
             }
-            downloadManager.enqueue(withItemUrl, format)
+            downloadManager.enqueue(withItemUrl, format, overrideExt = item.ext)
             if (MediaScraper.isDirectMediaUrl(item.url) || !track.videoId.isNullOrBlank()) {
                 emitToast("Download ${format.label} dimulai")
             } else {
@@ -620,7 +692,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun playTrack(track: Track) {
+    fun playTrack(track: Track, queueContext: List<Track>? = null) {
         if (track.videoId.isNullOrBlank() && !track.playlistBrowseId.isNullOrBlank()) {
             emitToast("Memuat Mix: ${track.title}")
             viewModelScope.launch {
@@ -632,7 +704,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }.getOrDefault(emptyList())
                 val firstPlayable = items.firstOrNull { !it.videoId.isNullOrBlank() }
                 if (firstPlayable != null) {
-                    player.play(firstPlayable)
+                    player.play(firstPlayable, items)
                     emitToast("Memutar: ${firstPlayable.title}")
                 } else {
                     emitToast("Tidak ada lagu yang bisa diputar di Mix ini")
@@ -640,8 +712,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        player.play(track)
+        player.play(track, queueContext)
         emitToast("Memutar: ${track.title}")
+    }
+
+    fun addToQueueNext(track: Track) {
+        player.addToQueueNext(track)
+        emitToast("Ditambah ke antrean berikutnya: ${track.title}")
     }
 
     fun openTrackSheet(track: Track) {
@@ -674,8 +751,383 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun enqueueDownload(track: Track, format: DownloadFormat) {
-        downloadManager.enqueue(track, format)
-        emitToast("Download ${format.label} dimulai")
+        openQualityPicker(track, format)
+    }
+
+    // ---- Server Menu management ----
+
+    fun getAllServers(): List<ScraperServer> {
+        val statusMap = _serverStatuses.value
+        return ServerManager.allServers(settings.value).map { statusMap[it.id] ?: it }
+    }
+
+    fun getActiveServer(): ScraperServer =
+        ServerManager.resolveActiveServer(settings.value)
+
+    fun selectServer(serverId: String) {
+        viewModelScope.launch {
+            repository.updateSettings { it.copy(activeServerId = serverId) }
+            val picked = ServerManager.allServers(settings.value).firstOrNull { it.id == serverId }
+            emitToast("Server aktif: ${picked?.name ?: serverId}")
+            if (_qualityPickerState.value != null) {
+                loadQualityPickerStreams(serverId)
+            }
+            if (_currentTab.value == AppTab.DOWNLOAD && _urlInput.value.isNotBlank() && _lastScrape.value != null) {
+                scrapeCurrentUrl()
+            }
+        }
+    }
+
+    fun pingAllServers() {
+        if (_pingingServers.value) return
+        viewModelScope.launch {
+            _pingingServers.value = true
+            try {
+                val list = ServerManager.allServers(settings.value)
+                val updated = coroutineScope {
+                    list.map { srv -> async { ServerManager.pingServer(srv) } }.awaitAll()
+                }
+                _serverStatuses.value = updated.associateBy { it.id }
+                val onlineCount = updated.count { it.lastStatus == ServerStatus.ONLINE }
+                emitToast("Ping selesai: $onlineCount/${updated.size} server online")
+            } finally {
+                _pingingServers.value = false
+            }
+        }
+    }
+
+    fun addCustomServer(name: String, baseUrl: String) {
+        val cleanUrl = baseUrl.trim()
+        if (!cleanUrl.startsWith("https://")) {
+            emitToast("URL server harus diawali https://")
+            return
+        }
+        val cleanName = name.trim().ifBlank { cleanUrl.removePrefix("https://").substringBefore('/') }
+        val newServer = ScraperServer(
+            id = "custom-${System.currentTimeMillis()}",
+            name = cleanName,
+            kind = ScraperServerKind.CUSTOM_API,
+            baseUrl = cleanUrl,
+            description = "Server API HTTPS kustom ($cleanUrl)",
+            supportsMultiPlatform = true,
+            isBuiltIn = false,
+        )
+        viewModelScope.launch {
+            repository.updateSettings { s ->
+                s.copy(
+                    customServers = s.customServers + newServer,
+                    activeServerId = newServer.id,
+                )
+            }
+            emitToast("Server '$cleanName' disimpan & dipilih")
+        }
+    }
+
+    fun removeCustomServer(serverId: String) {
+        viewModelScope.launch {
+            repository.updateSettings { s ->
+                val remaining = s.customServers.filterNot { it.id == serverId }
+                val nextActive = if (s.activeServerId == serverId) "auto" else s.activeServerId
+                s.copy(customServers = remaining, activeServerId = nextActive)
+            }
+            emitToast("Server kustom dihapus")
+        }
+    }
+
+    // ---- Universal Quality & MB Picker ----
+
+    fun openQualityPicker(track: Track, initialFormat: DownloadFormat? = null) {
+        val req = QualityPickerRequest(
+            track = track,
+            rawUrl = track.videoId?.let { "https://www.youtube.com/watch?v=$it" } ?: track.url.orEmpty(),
+            initialFormat = initialFormat,
+        )
+        _qualityPickerState.value = QualityPickerUiState(
+            request = req,
+            title = track.title,
+            subtitle = track.artist,
+            thumbnail = track.thumbnail,
+            isLoading = true,
+        )
+        loadQualityPickerStreams(settings.value.activeServerId)
+    }
+
+    fun openQualityPickerForScrape(scrape: ScrapeResult, initialFormat: DownloadFormat? = null) {
+        val track = MediaScraper.scrapeToTrack(scrape)
+        val req = QualityPickerRequest(
+            track = track,
+            rawUrl = scrape.rawUrl,
+            initialFormat = initialFormat,
+        )
+        _qualityPickerState.value = QualityPickerUiState(
+            request = req,
+            title = scrape.title.ifBlank { scrape.platformLabel },
+            subtitle = scrape.author ?: scrape.platformLabel,
+            thumbnail = scrape.thumbnail.orEmpty(),
+            scrapeResult = scrape,
+            isLoading = !track?.videoId.isNullOrBlank(),
+        )
+        if (!track?.videoId.isNullOrBlank()) {
+            loadQualityPickerStreams(settings.value.activeServerId)
+        }
+    }
+
+    fun switchPickerServer(serverId: String) {
+        viewModelScope.launch {
+            repository.updateSettings { it.copy(activeServerId = serverId) }
+            loadQualityPickerStreams(serverId)
+        }
+    }
+
+    fun retryQualityPicker() {
+        loadQualityPickerStreams(settings.value.activeServerId)
+    }
+
+    private fun loadQualityPickerStreams(serverId: String) {
+        val current = _qualityPickerState.value ?: return
+        qualityPickerJob?.cancel()
+        qualityPickerJob = viewModelScope.launch {
+            _qualityPickerState.value = current.copy(isLoading = true, errorMessage = null)
+            val srv = ServerManager.resolveActiveServer(settings.value, serverId)
+            val headers = authManager.buildAuthHeaders()
+            val vid = current.request.track?.videoId?.takeIf { it.isNotBlank() }
+                ?: current.request.rawUrl.takeIf { it.isNotBlank() }?.let { PlatformDetector.extractYoutubeId(it) }
+
+            if (!vid.isNullOrBlank()) {
+                val resolved = runCatching { ServerManager.resolveWithServer(vid, srv, headers) }.getOrNull()
+                if (resolved != null && (resolved.audioStreams.isNotEmpty() || resolved.videoStreams.isNotEmpty())) {
+                    _qualityPickerState.value = _qualityPickerState.value?.copy(
+                        resolvedStreams = resolved,
+                        isLoading = false,
+                        errorMessage = null,
+                    )
+                    return@launch
+                }
+            }
+
+            val rawUrl = current.request.rawUrl
+            if (rawUrl.isNotBlank()) {
+                val scrape = runCatching { MediaScraper.scrapeUrl(rawUrl, headers, srv) }.getOrNull()
+                if (scrape != null && scrape.items.isNotEmpty()) {
+                    _qualityPickerState.value = _qualityPickerState.value?.copy(
+                        scrapeResult = scrape,
+                        isLoading = false,
+                        errorMessage = scrape.error,
+                    )
+                    return@launch
+                }
+            }
+
+            _qualityPickerState.value = _qualityPickerState.value?.copy(
+                isLoading = false,
+                errorMessage = "Gagal mengambil daftar resolusi dari ${srv.name}. Coba ganti server lain di atas.",
+            )
+        }
+    }
+
+    fun closeQualityPicker() {
+        qualityPickerJob?.cancel()
+        _qualityPickerState.value = null
+    }
+
+    fun downloadStreamCandidate(candidate: StreamCandidate) {
+        val state = _qualityPickerState.value ?: return
+        val baseTrack = state.request.track ?: Track(
+            id = state.resolvedStreams?.videoId ?: "dl-${System.currentTimeMillis()}",
+            title = state.title,
+            artist = state.subtitle,
+            thumbnail = state.thumbnail,
+            source = if (!state.resolvedStreams?.videoId.isNullOrBlank()) TrackSource.YOUTUBE else TrackSource.URL,
+            videoId = state.resolvedStreams?.videoId,
+            url = candidate.url,
+        )
+        val format = if (candidate.isAudio) DownloadFormat.MP3 else DownloadFormat.MP4
+        downloadManager.enqueue(
+            track = baseTrack.copy(url = candidate.url),
+            format = format,
+            overrideExt = candidate.ext,
+            overrideUserAgent = candidate.userAgent.ifBlank { null },
+        )
+        emitToast("Mengunduh ${candidate.qualityLabel} (${candidate.formattedSize.ifBlank { candidate.ext.uppercase() }})")
+        closeQualityPicker()
+    }
+
+    fun downloadPickerMediaItem(item: MediaItem) {
+        val state = _qualityPickerState.value ?: return
+        val baseTrack = state.request.track ?: state.scrapeResult?.let { MediaScraper.scrapeToTrack(it) } ?: Track(
+            id = "dl-${System.currentTimeMillis()}",
+            title = state.title,
+            artist = state.subtitle,
+            thumbnail = state.thumbnail,
+            source = TrackSource.URL,
+            url = item.url,
+        )
+        val isAudio = item.type == "audio" || item.ext?.lowercase() in setOf("mp3", "m4a", "opus", "ogg", "wav")
+        val format = if (isAudio) DownloadFormat.MP3 else DownloadFormat.MP4
+        downloadManager.enqueue(
+            track = baseTrack.copy(url = item.url),
+            format = format,
+            overrideExt = item.ext,
+        )
+        emitToast("Download ${item.quality ?: format.label} dimulai")
+        closeQualityPicker()
+    }
+
+    fun previewStreamCandidate(candidate: StreamCandidate) {
+        val state = _qualityPickerState.value ?: return
+        openPreview(
+            PreviewTarget(
+                id = "qp-prev-${candidate.url.hashCode()}",
+                title = state.title,
+                subtitle = "${candidate.qualityLabel} · ${candidate.formattedSize}",
+                urlOrUri = candidate.url,
+                mimeType = candidate.mimeType,
+                ext = candidate.ext,
+                kind = if (candidate.isAudio) PreviewKind.AUDIO else PreviewKind.VIDEO,
+                thumbnail = state.thumbnail,
+                videoId = state.resolvedStreams?.videoId ?: state.request.track?.videoId,
+                userAgent = candidate.userAgent.ifBlank { "YMusic-Lite/0.3.0" },
+            ),
+        )
+    }
+
+    fun previewPickerMediaItem(item: MediaItem) {
+        val state = _qualityPickerState.value ?: return
+        val scrape = state.scrapeResult
+        if (scrape != null) {
+            previewMediaItem(scrape, item)
+        } else {
+            val ext = item.ext.orEmpty()
+            openPreview(
+                PreviewTarget(
+                    id = "qp-item-${item.url.hashCode()}",
+                    title = state.title,
+                    subtitle = item.quality.orEmpty(),
+                    urlOrUri = item.url,
+                    ext = ext,
+                    kind = PreviewTarget.detectKind(null, ext, item.type),
+                    thumbnail = state.thumbnail,
+                    videoId = state.request.track?.videoId,
+                ),
+            )
+        }
+    }
+
+    // ---- Now Playing Sheet, Lyrics, YouTube Comments & Like, Share ----
+
+    fun openNowPlaying() {
+        _nowPlayingOpen.value = true
+        val vid = playerState.value.track?.videoId
+        if (!vid.isNullOrBlank()) {
+            if (_commentsVideoId.value != vid) loadCommentsForTrack(vid)
+            if (_lyricsState.value.videoId != vid) loadLyricsForTrack(vid)
+        }
+    }
+
+    fun closeNowPlaying() {
+        _nowPlayingOpen.value = false
+    }
+
+    fun loadCommentsForTrack(videoId: String) {
+        if (videoId.isBlank()) return
+        _commentsVideoId.value = videoId
+        viewModelScope.launch {
+            _commentsLoading.value = true
+            val res = InnerTubeSocialClient.fetchCommentsAndLikeState(
+                videoId = videoId,
+                authHeaders = authManager.buildAuthHeaders(),
+            )
+            _commentsState.value = res
+            _commentsLoading.value = false
+        }
+    }
+
+    fun loadMoreComments() {
+        val vid = _commentsVideoId.value ?: return
+        val token = _commentsState.value.continuationToken ?: return
+        if (_commentsLoading.value) return
+        viewModelScope.launch {
+            _commentsLoading.value = true
+            val next = InnerTubeSocialClient.fetchCommentsAndLikeState(
+                videoId = vid,
+                authHeaders = authManager.buildAuthHeaders(),
+                continuationToken = token,
+            )
+            val prev = _commentsState.value
+            _commentsState.value = prev.copy(
+                comments = prev.comments + next.comments,
+                continuationToken = next.continuationToken,
+                createCommentParams = prev.createCommentParams ?: next.createCommentParams,
+            )
+            _commentsLoading.value = false
+        }
+    }
+
+    fun toggleLikeCurrentTrack() {
+        val vid = playerState.value.track?.videoId ?: return
+        if (!authManager.hasValidSession()) {
+            openLoginModal()
+            return
+        }
+        val currentlyLiked = _commentsState.value.isLikedByMe == true
+        val targetLike = !currentlyLiked
+        viewModelScope.launch {
+            val ok = InnerTubeSocialClient.toggleLikeVideo(vid, targetLike, authManager.buildAuthHeaders())
+            if (ok) {
+                _commentsState.value = _commentsState.value.copy(isLikedByMe = targetLike)
+                emitToast(if (targetLike) "Disukai di YouTube" else "Batal menyukai")
+            } else {
+                emitToast("Gagal mengubah status Like YouTube")
+            }
+        }
+    }
+
+    fun submitComment(commentText: String) {
+        val vid = playerState.value.track?.videoId ?: return
+        if (!authManager.hasValidSession()) {
+            openLoginModal()
+            return
+        }
+        if (_commentPosting.value) return
+        viewModelScope.launch {
+            _commentPosting.value = true
+            val res = InnerTubeSocialClient.createComment(
+                videoId = vid,
+                commentText = commentText,
+                createCommentParams = _commentsState.value.createCommentParams,
+                authHeaders = authManager.buildAuthHeaders(),
+            )
+            _commentPosting.value = false
+            res.onSuccess { posted ->
+                _commentsState.value = _commentsState.value.copy(
+                    comments = listOf(posted) + _commentsState.value.comments,
+                )
+                emitToast("Komentar terkirim ke YouTube")
+            }.onFailure { err ->
+                emitToast(err.message ?: "Gagal mengirim komentar")
+            }
+        }
+    }
+
+    fun loadLyricsForTrack(videoId: String) {
+        if (videoId.isBlank()) return
+        viewModelScope.launch {
+            _lyricsState.value = LyricsState(videoId = videoId, isLoading = true)
+            val res = InnerTubeSocialClient.fetchLyrics(videoId, authManager.buildAuthHeaders())
+            res.onSuccess { text ->
+                _lyricsState.value = LyricsState(videoId = videoId, text = text, sourceLabel = "YouTube Music", isLoading = false)
+            }.onFailure { err ->
+                _lyricsState.value = LyricsState(videoId = videoId, error = err.message ?: "Lirik tidak tersedia", isLoading = false)
+            }
+        }
+    }
+
+    fun shareTrack(track: Track) {
+        ShareHelper.shareTrackLink(appContext, track)
+    }
+
+    fun shareDownloadJob(job: DownloadJob) {
+        ShareHelper.shareDownloadedJob(appContext, job)
     }
 
     fun removeDownloadJob(id: String) = downloadManager.remove(id)
@@ -809,6 +1261,177 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun handleNotificationIntent(intent: Intent?) {
+        val route = intent?.getStringExtra(AppNotifications.EXTRA_NAV_ROUTE) ?: return
+        AppDiagnostics.info("Navigation", "Notification route -> $route")
+        when (route) {
+            AppNotifications.ROUTE_PLAYER -> {
+                openNowPlaying()
+            }
+            AppNotifications.ROUTE_SPATIAL -> {
+                selectTab(AppTab.SPATIAL)
+            }
+            AppNotifications.ROUTE_DOWNLOAD_QUEUE -> {
+                selectTab(AppTab.DOWNLOAD)
+            }
+            AppNotifications.ROUTE_DOWNLOAD_PREVIEW -> {
+                selectTab(AppTab.DOWNLOAD)
+                val jobId = intent.getStringExtra(AppNotifications.EXTRA_JOB_ID)
+                val job = jobId?.let { id -> downloadJobs.value.firstOrNull { it.id == id } }
+                if (job != null) {
+                    previewDownloadJob(job)
+                } else {
+                    val uri = intent.getStringExtra(AppNotifications.EXTRA_PREVIEW_URI)
+                    if (!uri.isNullOrBlank()) {
+                        val title = intent.getStringExtra(AppNotifications.EXTRA_PREVIEW_TITLE) ?: "Pratinjau File"
+                        val mime = intent.getStringExtra(AppNotifications.EXTRA_PREVIEW_MIME).orEmpty()
+                        val ext = uri.substringAfterLast('.', "")
+                        openPreview(
+                            PreviewTarget(
+                                id = jobId ?: "notif-${System.currentTimeMillis()}",
+                                title = title,
+                                subtitle = mime.ifBlank { "Hasil Unduhan" },
+                                urlOrUri = uri,
+                                mimeType = mime,
+                                ext = ext,
+                                kind = PreviewTarget.detectKind(mime, ext),
+                                downloadJobId = jobId,
+                            ),
+                        )
+                    }
+                }
+            }
+            AppNotifications.ROUTE_DEBUG -> {
+                selectTab(AppTab.DEBUG)
+            }
+        }
+    }
+
+    fun openPreview(target: PreviewTarget) {
+        if (player.state.value.playing) {
+            player.toggle()
+        }
+        _previewTarget.value = target
+    }
+
+    fun closePreview() {
+        _previewTarget.value = null
+    }
+
+    fun previewMediaItem(scrape: ScrapeResult, item: MediaItem) {
+        val ext = item.ext.orEmpty()
+        val targetKind = PreviewTarget.detectKind(null, ext, item.type)
+        val vid = if (scrape.platform == com.example.data.PlatformId.YOUTUBE) {
+            com.example.engine.PlatformDetector.extractYoutubeId(scrape.rawUrl)
+        } else {
+            null
+        }
+        openPreview(
+            PreviewTarget(
+                id = "item-${item.url.hashCode()}",
+                title = scrape.title.ifBlank { "Pratinjau Media" },
+                subtitle = item.quality ?: scrape.platformLabel,
+                urlOrUri = item.url,
+                ext = ext,
+                kind = targetKind,
+                thumbnail = scrape.thumbnail.orEmpty(),
+                videoId = vid,
+            ),
+        )
+    }
+
+    fun previewDownloadJob(job: DownloadJob) {
+        val localUri = job.contentUri?.takeIf { it.isNotBlank() } ?: job.filePath?.takeIf { it.startsWith("/") }
+        if (!localUri.isNullOrBlank()) {
+            val ext = job.filePath?.substringAfterLast('.', "")?.ifBlank { job.format.ext } ?: job.format.ext
+            val mime = job.mimeType.orEmpty()
+            openPreview(
+                PreviewTarget(
+                    id = job.id,
+                    title = job.track.title,
+                    subtitle = job.filePath ?: job.format.label,
+                    urlOrUri = localUri,
+                    mimeType = mime,
+                    ext = ext,
+                    kind = PreviewTarget.detectKind(mime, ext),
+                    thumbnail = job.track.thumbnail,
+                    videoId = job.track.videoId,
+                    downloadJobId = job.id,
+                ),
+            )
+            return
+        }
+
+        val remoteUrl = job.track.url
+        if (!remoteUrl.isNullOrBlank() && MediaScraper.isDirectMediaUrl(remoteUrl)) {
+            val ext = job.format.ext
+            openPreview(
+                PreviewTarget(
+                    id = job.id,
+                    title = job.track.title,
+                    subtitle = job.track.artist,
+                    urlOrUri = remoteUrl,
+                    ext = ext,
+                    kind = if (job.format == DownloadFormat.MP3) PreviewKind.AUDIO else PreviewKind.VIDEO,
+                    thumbnail = job.track.thumbnail,
+                    videoId = job.track.videoId,
+                    downloadJobId = job.id,
+                ),
+            )
+            return
+        }
+
+        if (!job.track.videoId.isNullOrBlank()) {
+            viewModelScope.launch {
+                val resolved = runCatching {
+                    InnerTubeClient.resolveStreams(job.track.videoId, authManager.buildAuthHeaders())
+                }.getOrNull()
+                val stream = if (job.format == DownloadFormat.MP3) {
+                    resolved?.bestAudio
+                } else {
+                    resolved?.bestVideo ?: resolved?.bestAudio
+                }
+                if (stream != null) {
+                    openPreview(
+                        PreviewTarget(
+                            id = job.id,
+                            title = job.track.title,
+                            subtitle = stream.qualityLabel,
+                            urlOrUri = stream.url,
+                            mimeType = stream.mimeType,
+                            ext = stream.ext,
+                            kind = if (stream.isAudio) PreviewKind.AUDIO else PreviewKind.VIDEO,
+                            thumbnail = job.track.thumbnail,
+                            videoId = job.track.videoId,
+                            downloadJobId = job.id,
+                            userAgent = stream.userAgent.ifBlank { "YMusic-Lite/0.3.0" },
+                        ),
+                    )
+                } else {
+                    emitToast("Stream pratinjau tidak tersedia")
+                }
+            }
+        } else {
+            emitToast("Berkas lokal belum selesai diunduh")
+        }
+    }
+
+    fun playPreviewTargetIn8D(target: PreviewTarget) {
+        val job = target.downloadJobId?.let { id -> downloadJobs.value.firstOrNull { it.id == id } }
+        val track = job?.track?.copy(url = target.urlOrUri)
+            ?: Track(
+                id = target.videoId ?: target.id,
+                title = target.title,
+                artist = target.subtitle.ifBlank { "Preview 8D" },
+                thumbnail = target.thumbnail,
+                source = if (!target.videoId.isNullOrBlank()) TrackSource.YOUTUBE else TrackSource.LOCAL,
+                videoId = target.videoId,
+                url = target.urlOrUri,
+            )
+        playTrack(track)
+        selectTab(AppTab.SPATIAL)
+    }
+
     fun emitToast(msg: String) {
         _toastMessage.tryEmit(msg)
     }
@@ -816,6 +1439,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         SpatialHostBridge.onSharedText = null
-        player.release()
     }
 }

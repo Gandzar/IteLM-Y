@@ -10,8 +10,10 @@ import com.example.data.DownloadFormat
 import com.example.data.DownloadJob
 import com.example.data.DownloadStatus
 import com.example.data.Track
+import com.example.debug.AppDiagnostics
 import com.example.engine.InnerTubeClient
 import com.example.engine.MediaScraper
+import com.example.notify.AppNotifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,7 +50,12 @@ class DownloadManager(
         }
     }
 
-    fun enqueue(track: Track, format: DownloadFormat): DownloadJob {
+    fun enqueue(
+        track: Track,
+        format: DownloadFormat,
+        overrideExt: String? = null,
+        overrideUserAgent: String? = null,
+    ): DownloadJob {
         val job = DownloadJob(
             id = "dl-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(5)}",
             track = track,
@@ -56,17 +63,25 @@ class DownloadManager(
             status = DownloadStatus.QUEUED,
             progress = 0,
         )
+        AppDiagnostics.info("Download", "Queued ${format.label}: ${track.title}")
         updateJobs { listOf(job) + it }
-        scope.launch { processJob(job.id, track, format) }
+        DownloadForegroundService.sync(context)
+        scope.launch { processJob(job.id, track, format, overrideExt, overrideUserAgent) }
         return job
     }
 
-    private suspend fun processJob(jobId: String, track: Track, format: DownloadFormat) {
+    private suspend fun processJob(
+        jobId: String,
+        track: Track,
+        format: DownloadFormat,
+        overrideExt: String?,
+        overrideUserAgent: String?,
+    ) {
         updateSingle(jobId) { it.copy(status = DownloadStatus.DOWNLOADING, progress = 5) }
 
         var targetUrl = track.url?.takeIf { it.isNotBlank() && MediaScraper.isDirectMediaUrl(it) }
-        var userAgent = "YMusic-Lite/0.3.0"
-        var actualExt = format.ext
+        var userAgent = overrideUserAgent?.takeIf { it.isNotBlank() } ?: "YMusic-Lite/0.3.0"
+        var actualExt = overrideExt?.takeIf { it.isNotBlank() } ?: format.ext
 
         // Resolve via InnerTube when track is a YouTube/YT Music item without direct stream URL
         if (targetUrl == null && !track.videoId.isNullOrBlank()) {
@@ -88,13 +103,15 @@ class DownloadManager(
         }
 
         if (targetUrl == null) {
+            val errMsg = "Stream URL belum tersedia untuk video ini. Coba login akun Google atau tempel URL media langsung."
+            AppDiagnostics.error("Download", "No stream URL for ${track.title}")
+            var failedJob: DownloadJob? = null
             updateSingle(jobId) {
-                it.copy(
-                    status = DownloadStatus.ERROR,
-                    progress = 0,
-                    error = "Stream URL belum tersedia untuk video ini. Coba login akun Google atau tempel URL media langsung.",
-                )
+                val next = it.copy(status = DownloadStatus.ERROR, progress = 0, error = errMsg)
+                failedJob = next
+                next
             }
+            failedJob?.let { AppNotifications.notifyDownloadFailed(context, it) }
             return
         }
 
@@ -118,10 +135,14 @@ class DownloadManager(
                     "opus", "ogg" -> "audio/ogg"
                     "mp3" -> "audio/mpeg"
                     "wav" -> "audio/wav"
+                    "jpg", "jpeg" -> "image/jpeg"
+                    "png" -> "image/png"
+                    "webp" -> "image/webp"
+                    "webm" -> "video/webm"
                     else -> "video/mp4"
                 }
 
-                val savedPath = saveStream(
+                val saved = saveStream(
                     fileName = fileName,
                     folder = folder,
                     mimeType = mimeType,
@@ -148,30 +169,44 @@ class DownloadManager(
 
                 updateSingle(jobId) { it.copy(status = DownloadStatus.CONVERTING, progress = 96) }
                 delay(150)
+                var doneJob: DownloadJob? = null
                 updateSingle(jobId) {
-                    it.copy(
+                    val next = it.copy(
                         status = DownloadStatus.DONE,
                         progress = 100,
-                        filePath = savedPath,
+                        filePath = saved.displayPath,
+                        contentUri = saved.uriString,
+                        mimeType = mimeType,
                     )
+                    doneJob = next
+                    next
                 }
+                AppDiagnostics.info("Download", "Finished: ${saved.displayPath}")
+                doneJob?.let { AppNotifications.notifyDownloadFinished(context, it) }
             }
         } catch (e: Exception) {
+            AppDiagnostics.error("Download", "Failed ${track.title}: ${e.message}")
+            var failedJob: DownloadJob? = null
             updateSingle(jobId) {
-                it.copy(
+                val next = it.copy(
                     status = DownloadStatus.ERROR,
                     error = e.message ?: "Download gagal",
                 )
+                failedJob = next
+                next
             }
+            failedJob?.let { AppNotifications.notifyDownloadFailed(context, it) }
         }
     }
+
+    private data class SavedFileInfo(val displayPath: String, val uriString: String)
 
     private fun saveStream(
         fileName: String,
         folder: String,
         mimeType: String,
         writer: (java.io.OutputStream) -> Unit,
-    ): String {
+    ): SavedFileInfo {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
@@ -183,13 +218,19 @@ class DownloadManager(
                 ?: throw IllegalStateException("Gagal membuat file di Documents/$folder")
             resolver.openOutputStream(uri)?.use(writer)
                 ?: throw IllegalStateException("Tidak dapat menulis ke file")
-            return "Documents/$folder/$fileName"
+            return SavedFileInfo(
+                displayPath = "Documents/$folder/$fileName",
+                uriString = uri.toString(),
+            )
         } else {
             val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
             val dir = File(baseDir, folder).apply { if (!exists()) mkdirs() }
             val outFile = File(dir, fileName)
             FileOutputStream(outFile).use(writer)
-            return outFile.absolutePath
+            return SavedFileInfo(
+                displayPath = outFile.absolutePath,
+                uriString = android.net.Uri.fromFile(outFile).toString(),
+            )
         }
     }
 
@@ -199,7 +240,11 @@ class DownloadManager(
 
     fun clearFinished() {
         updateJobs { list ->
-            list.filter { it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED }
+            list.filter {
+                it.status == DownloadStatus.DOWNLOADING ||
+                    it.status == DownloadStatus.QUEUED ||
+                    it.status == DownloadStatus.CONVERTING
+            }
         }
     }
 

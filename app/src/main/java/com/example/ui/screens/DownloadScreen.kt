@@ -25,13 +25,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlayCircleOutline
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -71,12 +77,14 @@ import com.example.data.DownloadJob
 import com.example.data.DownloadStatus
 import com.example.data.MediaItem
 import com.example.data.ScrapeResult
+import com.example.data.ScraperServer
 import com.example.ui.theme.DangerRed
 import com.example.ui.theme.YtCard
 import com.example.ui.theme.YtChipBg
 import com.example.ui.theme.YtDivider
 import com.example.ui.theme.YtElevated
 import com.example.ui.theme.YtOrange
+import com.example.ui.theme.YtOrangeSoft
 import com.example.ui.theme.YtTextMuted
 import com.example.ui.theme.YtTextPrimary
 import com.example.ui.theme.YtTextSecondary
@@ -88,12 +96,19 @@ fun DownloadScreen(
     scrapeBusy: Boolean,
     lastScrape: ScrapeResult?,
     downloadJobs: List<DownloadJob>,
+    activeServer: ScraperServer,
+    onOpenServerMenu: () -> Unit,
     onUrlChange: (String) -> Unit,
     onScrape: () -> Unit,
     onToast: (String) -> Unit,
     onDownloadItem: (MediaItem) -> Unit,
+    onPreviewItem: (MediaItem) -> Unit,
+    onOpenQualityPicker: (ScrapeResult) -> Unit,
+    onShareScrape: (ScrapeResult) -> Unit,
     onSaveToLibrary: () -> Unit,
     onPlayScrape: () -> Unit,
+    onPreviewJob: (DownloadJob) -> Unit,
+    onShareJob: (DownloadJob) -> Unit,
     onRemoveJob: (String) -> Unit,
     onClearFinishedJobs: () -> Unit,
     modifier: Modifier = Modifier,
@@ -107,6 +122,50 @@ fun DownloadScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        item {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = YtCard,
+                border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
+                modifier = Modifier
+                    .widthIn(max = 640.dp)
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenServerMenu)
+                    .testTag("dl_active_server_banner"),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(Icons.Default.Dns, contentDescription = null, tint = YtOrange, modifier = Modifier.size(20.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Server Scraper Aktif",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = YtTextMuted,
+                        )
+                        Text(
+                            text = activeServer.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = YtTextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Surface(color = YtOrangeSoft, shape = RoundedCornerShape(8.dp)) {
+                        Text(
+                            text = "Ganti Server",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = YtOrange,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
+        }
         item {
             Card(
                 modifier = Modifier
@@ -282,6 +341,9 @@ fun DownloadScreen(
                 ScrapeResultCard(
                     result = lastScrape,
                     onDownloadItem = onDownloadItem,
+                    onPreviewItem = onPreviewItem,
+                    onOpenQualityPicker = { onOpenQualityPicker(lastScrape) },
+                    onShareScrape = { onShareScrape(lastScrape) },
                     onSaveToLibrary = onSaveToLibrary,
                     onPlay = onPlayScrape,
                     modifier = Modifier.widthIn(max = 640.dp),
@@ -313,6 +375,8 @@ fun DownloadScreen(
             items(downloadJobs, key = { it.id }) { job ->
                 DownloadJobRow(
                     job = job,
+                    onPreview = { onPreviewJob(job) },
+                    onShare = { onShareJob(job) },
                     onRemove = { onRemoveJob(job.id) },
                     modifier = Modifier.widthIn(max = 640.dp),
                 )
@@ -325,6 +389,9 @@ fun DownloadScreen(
 private fun ScrapeResultCard(
     result: ScrapeResult,
     onDownloadItem: (MediaItem) -> Unit,
+    onPreviewItem: (MediaItem) -> Unit,
+    onOpenQualityPicker: () -> Unit,
+    onShareScrape: () -> Unit,
     onSaveToLibrary: () -> Unit,
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
@@ -380,26 +447,68 @@ private fun ScrapeResultCard(
 
             Spacer(Modifier.height(12.dp))
 
+            if (result.items.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = onOpenQualityPicker,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                        .testTag("scrape_open_quality_picker_btn"),
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, YtOrange),
+                ) {
+                    Icon(Icons.Default.Tune, contentDescription = null, tint = YtOrange, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Pilih Resolusi, Ukuran (MB) & Ganti Server", color = YtOrange, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
             result.items.forEachIndexed { idx, item ->
                 val qualityText = item.quality?.let { " · $it" } ?: ""
                 val extText = item.ext?.let { " ($it)" } ?: ""
-                OutlinedButton(
-                    onClick = { onDownloadItem(item) },
+                val sizeText = item.size?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 3.dp)
-                        .testTag("scrape_item_btn_$idx"),
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
+                        .padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Icon(Icons.Default.Download, contentDescription = null, tint = YtOrange, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "${item.type.uppercase()}$qualityText$extText",
-                        color = YtTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    OutlinedButton(
+                        onClick = { onDownloadItem(item) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("scrape_item_btn_$idx"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, tint = YtOrange, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "${item.type.uppercase()}$qualityText$extText$sizeText",
+                            color = YtTextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = YtElevated,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
+                    ) {
+                        IconButton(
+                            onClick = { onPreviewItem(item) },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("scrape_item_preview_btn_$idx"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayCircleOutline,
+                                contentDescription = "Pratinjau ${item.type}",
+                                tint = YtOrange,
+                            )
+                        }
+                    }
                 }
             }
 
@@ -422,6 +531,18 @@ private fun ScrapeResultCard(
                         Spacer(Modifier.width(6.dp))
                         Text("Library", color = YtTextPrimary, maxLines = 1)
                     }
+                    OutlinedButton(
+                        onClick = onShareScrape,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("scrape_share_btn"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, tint = YtTextPrimary, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Bagikan", color = YtTextPrimary, maxLines = 1)
+                    }
                     Button(
                         onClick = onPlay,
                         modifier = Modifier
@@ -443,6 +564,8 @@ private fun ScrapeResultCard(
 @Composable
 private fun DownloadJobRow(
     job: DownloadJob,
+    onPreview: () -> Unit,
+    onShare: () -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -476,6 +599,30 @@ private fun DownloadJobRow(
                         color = if (job.status == DownloadStatus.ERROR) DangerRed else YtTextSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(
+                    onClick = onPreview,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("job_preview_btn_${job.id}"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Visibility,
+                        contentDescription = "Pratinjau berkas",
+                        tint = if (job.status == DownloadStatus.DONE) YtOrange else YtTextSecondary,
+                    )
+                }
+                IconButton(
+                    onClick = onShare,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("job_share_btn_${job.id}"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Bagikan berkas",
+                        tint = YtTextSecondary,
                     )
                 }
                 IconButton(

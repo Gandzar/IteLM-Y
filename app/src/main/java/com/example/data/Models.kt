@@ -89,7 +89,40 @@ data class DownloadJob(
     val progress: Int = 0,
     val error: String? = null,
     val filePath: String? = null,
+    val contentUri: String? = null,
+    val mimeType: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+)
+
+enum class ScraperServerKind(val label: String) {
+    AUTO("Auto Failover"),
+    INNERTUBE_VR("InnerTube VR"),
+    INNERTUBE_IOS("InnerTube iOS"),
+    INNERTUBE_ANDROID("InnerTube Android"),
+    INNERTUBE_WEB_REMIX("YT Music Web (Login)"),
+    PIPED_MIRROR("Piped Mirror"),
+    BUILTIN_SCRAPER("Builtin Scraper"),
+    CUSTOM_API("Custom API Server"),
+}
+
+@Serializable
+enum class ServerStatus {
+    UNKNOWN,
+    ONLINE,
+    OFFLINE,
+}
+
+@Serializable
+data class ScraperServer(
+    val id: String,
+    val name: String,
+    val kind: ScraperServerKind,
+    val baseUrl: String = "",
+    val description: String = "",
+    val supportsMultiPlatform: Boolean = true,
+    val isBuiltIn: Boolean = true,
+    val lastPingMs: Long? = null,
+    val lastStatus: ServerStatus = ServerStatus.UNKNOWN,
 )
 
 @Serializable
@@ -103,6 +136,8 @@ data class AppSettings(
     val useCustomEngine: Boolean = false,
     val autoCheckAppUpdate: Boolean = true,
     val youtubeApiKey: String = "",
+    val activeServerId: String = "auto",
+    val customServers: List<ScraperServer> = emptyList(),
 )
 
 @Serializable
@@ -153,9 +188,11 @@ enum class AppTab(val route: String, val title: String, val isPrimaryTab: Boolea
     LIBRARY("library", "Perpustakaan", true),
     SEARCH("search", "Cari", false),
     DOWNLOAD("download", "All Downloader", false),
+    SERVERS("servers", "Menu Server", false),
     SPATIAL("spatial", "Spatial 8D", false),
     HISTORY("history", "Riwayat", false),
     SETTINGS("settings", "Pengaturan", false),
+    DEBUG("debug", "Debug & RAM", false),
 }
 
 enum class HomeChip(val label: String, val queryHint: String?) {
@@ -201,6 +238,11 @@ data class StreamCandidate(
     val qualityLabel: String = "",
     val isAudio: Boolean = true,
     val userAgent: String = "",
+    val sizeBytes: Long = 0L,
+    val formattedSize: String = "",
+    val fps: Int = 0,
+    val hasAudio: Boolean = true,
+    val clientSourceLabel: String = "",
 )
 
 data class ResolvedStreams(
@@ -213,6 +255,45 @@ data class ResolvedStreams(
     val videoStreams: List<StreamCandidate> = emptyList(),
     val bestAudio: StreamCandidate? = null,
     val bestVideo: StreamCandidate? = null,
+    val sourceServerName: String = "",
+)
+
+enum class RepeatMode(val label: String) {
+    OFF("Mati"),
+    ALL("Ulangi Semua"),
+    ONE("Ulangi 1 Lagu"),
+}
+
+data class YtComment(
+    val id: String,
+    val author: String,
+    val avatarUrl: String = "",
+    val text: String,
+    val publishedTime: String = "",
+    val likeCount: String = "",
+)
+
+data class CommentsPageResult(
+    val comments: List<YtComment> = emptyList(),
+    val continuationToken: String? = null,
+    val createCommentParams: String? = null,
+    val isLikedByMe: Boolean? = null,
+    val likeCountText: String = "",
+)
+
+data class LyricsState(
+    val videoId: String = "",
+    val text: String = "",
+    val sourceLabel: String = "",
+    val isLoading: Boolean = false,
+    val error: String? = null,
+)
+
+data class QualityPickerRequest(
+    val id: String = "qp-${System.currentTimeMillis()}",
+    val track: Track? = null,
+    val rawUrl: String = "",
+    val initialFormat: DownloadFormat? = null,
 )
 
 enum class LibrarySection(val label: String) {
@@ -225,3 +306,39 @@ enum class HistorySection(val label: String) {
     SCRAPE("Scrape"),
     YOUTUBE_MUSIC("YT Music"),
 }
+
+enum class PreviewKind(val label: String) {
+    VIDEO("Video"),
+    AUDIO("Audio"),
+    IMAGE("Gambar"),
+    FILE("Berkas"),
+}
+
+data class PreviewTarget(
+    val id: String,
+    val title: String,
+    val subtitle: String = "",
+    val urlOrUri: String,
+    val mimeType: String = "",
+    val ext: String = "",
+    val kind: PreviewKind,
+    val thumbnail: String = "",
+    val videoId: String? = null,
+    val downloadJobId: String? = null,
+    val userAgent: String = "YMusic-Lite/0.3.0",
+) {
+    companion object {
+        fun detectKind(mimeType: String?, ext: String?, typeHint: String? = null): PreviewKind {
+            val m = mimeType.orEmpty().lowercase()
+            val e = ext.orEmpty().lowercase().trimStart('.')
+            val t = typeHint.orEmpty().lowercase()
+            return when {
+                m.startsWith("video/") || e in setOf("mp4", "webm", "mkv", "mov", "3gp", "m4v") || t == "video" -> PreviewKind.VIDEO
+                m.startsWith("audio/") || e in setOf("mp3", "m4a", "opus", "ogg", "wav", "aac", "flac") || t == "audio" -> PreviewKind.AUDIO
+                m.startsWith("image/") || e in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp") || t == "image" -> PreviewKind.IMAGE
+                else -> PreviewKind.FILE
+            }
+        }
+    }
+}
+

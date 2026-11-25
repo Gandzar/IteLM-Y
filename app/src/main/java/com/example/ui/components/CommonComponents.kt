@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.AllInclusive
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
@@ -23,6 +24,8 @@ import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -263,8 +266,10 @@ fun TrackOptionsBottomSheet(
     inLibrary: Boolean,
     onDismiss: () -> Unit,
     onPlay: () -> Unit,
+    onPlayNext: () -> Unit,
     onToggleLibrary: () -> Unit,
-    onDownload: (DownloadFormat) -> Unit,
+    onOpenQualityPicker: (DownloadFormat?) -> Unit,
+    onShare: () -> Unit,
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -296,13 +301,22 @@ fun TrackOptionsBottomSheet(
 
             SheetActionRow(
                 icon = Icons.Default.PlayArrow,
-                label = "Putar",
+                label = "Putar Sekarang",
                 tint = YtOrange,
                 onClick = {
                     onPlay()
                     onDismiss()
                 },
                 testTag = "sheet_play_btn",
+            )
+            SheetActionRow(
+                icon = Icons.AutoMirrored.Filled.QueueMusic,
+                label = "Putar Berikutnya (Antrean)",
+                onClick = {
+                    onPlayNext()
+                    onDismiss()
+                },
+                testTag = "sheet_play_next_btn",
             )
             SheetActionRow(
                 icon = if (inLibrary) Icons.Default.Delete else Icons.Default.LibraryAdd,
@@ -314,22 +328,41 @@ fun TrackOptionsBottomSheet(
                 testTag = "sheet_library_btn",
             )
             SheetActionRow(
-                icon = Icons.Default.Download,
-                label = "Download MP3",
+                icon = Icons.Default.Tune,
+                label = "Pilih Resolusi & Ukuran (MB)",
+                tint = YtOrange,
                 onClick = {
-                    onDownload(DownloadFormat.MP3)
                     onDismiss()
+                    onOpenQualityPicker(null)
+                },
+                testTag = "sheet_quality_picker_btn",
+            )
+            SheetActionRow(
+                icon = Icons.Default.Download,
+                label = "Download MP3 (Pilih Bitrate)",
+                onClick = {
+                    onDismiss()
+                    onOpenQualityPicker(DownloadFormat.MP3)
                 },
                 testTag = "sheet_dl_mp3_btn",
             )
             SheetActionRow(
                 icon = Icons.Default.Download,
-                label = "Download MP4",
+                label = "Download MP4 (Pilih Resolusi)",
                 onClick = {
-                    onDownload(DownloadFormat.MP4)
                     onDismiss()
+                    onOpenQualityPicker(DownloadFormat.MP4)
                 },
                 testTag = "sheet_dl_mp4_btn",
+            )
+            SheetActionRow(
+                icon = Icons.Default.Share,
+                label = "Bagikan Tautan",
+                onClick = {
+                    onDismiss()
+                    onShare()
+                },
+                testTag = "sheet_share_btn",
             )
         }
     }

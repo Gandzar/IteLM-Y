@@ -17,9 +17,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.content.Intent
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -44,7 +47,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import com.example.debug.DebugActivity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -96,8 +101,11 @@ fun SettingsScreen(
     onRevertCustomEngine: () -> Unit,
     onDownloadFolderChange: (String) -> Unit,
     onYoutubeApiKeyChange: (String) -> Unit,
+    onOpenServerMenu: () -> Unit = {},
+    onOpenDebugPanel: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
     var engineUrlDraft by remember(settings.customEngineUrl) { mutableStateOf(settings.customEngineUrl) }
     var folderDraft by remember(settings.downloadFolder) { mutableStateOf(settings.downloadFolder) }
     var ytKeyDraft by remember(settings.youtubeApiKey) { mutableStateOf(settings.youtubeApiKey) }
@@ -508,6 +516,68 @@ fun SettingsScreen(
                         unfocusedTextColor = YtTextPrimary,
                     ),
                 )
+            }
+        }
+
+        item {
+            SectionLabel("Server Scraper & Mirror", Modifier.widthIn(max = 640.dp))
+            SettingsCard(Modifier.widthIn(max = 640.dp)) {
+                Text(
+                    "Pilih server InnerTube (VR, iOS, Android, YT Music Web Login), Piped mirror, uji ping, atau tambahkan server API HTTPS kustom.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary,
+                )
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = onOpenServerMenu,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_open_server_menu_btn"),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = YtOrange, contentColor = Color.White),
+                ) {
+                    Icon(Icons.Default.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Buka Menu Server", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+
+        item {
+            SectionLabel("Diagnostik & Debug", Modifier.widthIn(max = 640.dp))
+            SettingsCard(Modifier.widthIn(max = 640.dp)) {
+                Text(
+                    "Pantau penggunaan RAM real-time, status Activity & Foreground Service, serta log jaringan/pemutar.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onOpenDebugPanel,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("settings_open_debug_panel_btn"),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = YtOrange, contentColor = Color.White),
+                    ) {
+                        Icon(Icons.Default.BugReport, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Panel Debug", maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(Intent(context, DebugActivity::class.java))
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("settings_open_debug_activity_btn"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, YtDivider),
+                    ) {
+                        Text("Debug Activity", color = YtTextPrimary, maxLines = 1)
+                    }
+                }
             }
         }
 

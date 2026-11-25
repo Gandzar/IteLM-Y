@@ -5,6 +5,7 @@ import com.example.data.PlatformId
 import com.example.data.ScrapeResult
 import com.example.data.Track
 import com.example.data.TrackSource
+import com.example.debug.AppDiagnostics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -21,17 +22,21 @@ object MediaScraper {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    private val directMediaRegex = Regex("\\.(mp3|m4a|wav|ogg|opus|aac|flac|mp4|webm|mkv)(\\?.*)?$", RegexOption.IGNORE_CASE)
+    private val directMediaRegex = Regex("\\.(mp3|m4a|wav|ogg|opus|aac|flac|mp4|webm|mkv|m3u8|mpd)(\\?.*)?$", RegexOption.IGNORE_CASE)
 
     fun isDirectMediaUrl(url: String): Boolean {
         val cleaned = url.trim()
-        return directMediaRegex.containsMatchIn(cleaned) ||
+        return cleaned.startsWith("/") ||
+            cleaned.startsWith("content://", ignoreCase = true) ||
+            cleaned.startsWith("file://", ignoreCase = true) ||
+            directMediaRegex.containsMatchIn(cleaned) ||
             cleaned.contains("googlevideo.com/videoplayback", ignoreCase = true)
     }
 
     suspend fun scrapeUrl(
         url: String,
         authHeaders: Map<String, String> = emptyMap(),
+        server: com.example.data.ScraperServer = ServerManager.builtInServers.first(),
     ): ScrapeResult = withContext(Dispatchers.IO) {
         val cleaned = url.trim()
         if (cleaned.isEmpty()) {
@@ -42,6 +47,7 @@ object MediaScraper {
             val ext = directMediaRegex.find(cleaned)?.groupValues?.getOrNull(1)?.lowercase() ?: "m4a"
             val isAudio = ext in setOf("mp3", "m4a", "wav", "ogg", "opus", "aac", "flac")
             val fileName = cleaned.substringAfterLast('/').substringBefore('?').ifBlank { "Direct Media" }
+            val probeSize = probeRemoteSizeLabel(cleaned)
             return@withContext ScrapeResult(
                 status = true,
                 platform = PlatformId.UNKNOWN,
@@ -54,25 +60,41 @@ object MediaScraper {
                         quality = "Direct Stream",
                         url = cleaned,
                         ext = ext,
+                        size = probeSize,
                     ),
                 ),
                 rawUrl = cleaned,
             )
         }
 
+        if (server.kind == com.example.data.ScraperServerKind.CUSTOM_API) {
+            val customRes = ServerManager.scrapeViaCustomJsonServer(server, cleaned)
+            if (customRes != null) return@withContext customRes
+        }
+
         val platform = PlatformDetector.detectPlatform(cleaned)
         val label = PlatformDetector.platformLabel(platform)
+        AppDiagnostics.info("Scraper", "Scraping $label via ${server.name}")
 
         try {
             when (platform) {
-                PlatformId.YOUTUBE -> scrapeYoutube(cleaned, authHeaders)
+                PlatformId.YOUTUBE -> scrapeYoutube(cleaned, authHeaders, server)
                 PlatformId.TIKTOK -> scrapeTiktok(cleaned)
                 else -> scrapeGeneric(cleaned, platform, label)
             }
         } catch (e: Exception) {
+            AppDiagnostics.error("Scraper", "Scrape failed ($label): ${e.message}")
             emptyResult(cleaned, platform, e.message ?: "Scrape gagal")
         }
     }
+
+    private fun probeRemoteSizeLabel(url: String): String? = runCatching {
+        val req = Request.Builder().url(url).head().header("User-Agent", "YMusic-Lite/0.3.0").build()
+        client.newCall(req).execute().use { res ->
+            val len = res.header("Content-Length")?.toLongOrNull() ?: 0L
+            ServerManager.formatSizeMb(len, 0, 0).ifBlank { null }
+        }
+    }.getOrNull()
 
     private fun emptyResult(url: String, platform: PlatformId, error: String): ScrapeResult = ScrapeResult(
         status = false,
@@ -87,12 +109,13 @@ object MediaScraper {
     private suspend fun scrapeYoutube(
         url: String,
         authHeaders: Map<String, String>,
+        server: com.example.data.ScraperServer,
     ): ScrapeResult {
         val videoId = PlatformDetector.extractYoutubeId(url)
             ?: return emptyResult(url, PlatformId.YOUTUBE, "Video ID tidak ditemukan")
 
         val resolved = runCatching {
-            InnerTubeClient.resolveStreams(videoId, authHeaders)
+            ServerManager.resolveWithServer(videoId, server, authHeaders)
         }.getOrNull()
 
         var title = resolved?.title?.takeIf { it.isNotBlank() } ?: "YouTube Video"
@@ -101,7 +124,7 @@ object MediaScraper {
             ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
         val duration = resolved?.durationSec?.takeIf { it > 0 }
 
-        // Supplement metadata with oEmbed if InnerTube title is blank
+        // Supplement metadata with oEmbed if title is blank
         if (title == "YouTube Video" || author.isBlank()) {
             runCatching {
                 val encoded = URLEncoder.encode("https://www.youtube.com/watch?v=$videoId", "UTF-8")
@@ -126,23 +149,25 @@ object MediaScraper {
         }
 
         val items = buildList {
-            resolved?.audioStreams?.take(3)?.forEach { s ->
+            resolved?.audioStreams?.forEach { s ->
                 add(
                     MediaItem(
                         type = "audio",
                         quality = s.qualityLabel,
                         url = s.url,
                         ext = s.ext,
+                        size = s.formattedSize.ifBlank { null },
                     ),
                 )
             }
-            resolved?.videoStreams?.take(3)?.forEach { s ->
+            resolved?.videoStreams?.forEach { s ->
                 add(
                     MediaItem(
                         type = "video",
                         quality = s.qualityLabel,
                         url = s.url,
                         ext = s.ext,
+                        size = s.formattedSize.ifBlank { null },
                     ),
                 )
             }
@@ -158,10 +183,17 @@ object MediaScraper {
             }
         }
 
+        val baseLabel = if (url.contains("music.youtube.com", ignoreCase = true)) "YouTube Music" else "YouTube"
+        val resolvedLabel = if (resolved?.sourceServerName?.isNotBlank() == true) {
+            "$baseLabel · ${resolved.sourceServerName}"
+        } else {
+            baseLabel
+        }
+
         return ScrapeResult(
             status = true,
             platform = PlatformId.YOUTUBE,
-            platformLabel = if (url.contains("music.youtube.com", ignoreCase = true)) "YouTube Music" else "YouTube",
+            platformLabel = resolvedLabel,
             title = title,
             author = author.ifBlank { null },
             thumbnail = thumbnail,

@@ -1,6 +1,10 @@
 package com.example.ui
 
+import android.Manifest
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +27,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
@@ -33,6 +39,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SpatialAudioOff
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
@@ -74,6 +82,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -82,16 +91,29 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.data.AppTab
+import com.example.data.DownloadFormat
 import com.example.data.LibrarySubView
+import com.example.data.PreviewKind
+import com.example.data.Track
+import com.example.data.TrackSource
+import com.example.engine.MediaScraper
+import com.example.engine.ServerManager
+import com.example.notify.AppNotifications
 import com.example.player.PlayerMode
+import com.example.share.ShareHelper
 import com.example.ui.components.GoogleLoginDialog
 import com.example.ui.components.MiniPlayerBar
+import com.example.ui.components.NowPlayingSheet
+import com.example.ui.components.QualityPickerDialog
 import com.example.ui.components.TrackOptionsBottomSheet
+import com.example.ui.components.UniversalPreviewDialog
 import com.example.ui.components.YouTubeEmbedOverlay
+import com.example.ui.screens.DebugScreen
 import com.example.ui.screens.DownloadScreen
 import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.SearchScreen
+import com.example.ui.screens.ServerMenuScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SpatialScreen
 import com.example.ui.screens.YouTubeFeedScreen
@@ -128,8 +150,10 @@ private val PRIMARY_TABS = listOf(
 private val DRAWER_TOOL_TABS = listOf(
     TabMeta(AppTab.SEARCH, "Cari Lagu & Video", Icons.Filled.Search, Icons.Outlined.Search),
     TabMeta(AppTab.DOWNLOAD, "All Downloader", Icons.Filled.Download, Icons.Outlined.Download),
+    TabMeta(AppTab.SERVERS, "Menu Server", Icons.Filled.Dns, Icons.Outlined.Dns),
     TabMeta(AppTab.SPATIAL, "Spatial 8D Studio", Icons.Filled.SpatialAudioOff, Icons.Outlined.SpatialAudioOff),
     TabMeta(AppTab.HISTORY, "Riwayat & Scrape", Icons.Filled.History, Icons.Outlined.History),
+    TabMeta(AppTab.DEBUG, "Debug & RAM", Icons.Filled.BugReport, Icons.Outlined.BugReport),
     TabMeta(AppTab.SETTINGS, "Pengaturan", Icons.Filled.Settings, Icons.Outlined.Settings),
 )
 
@@ -177,6 +201,22 @@ fun YMusicApp(
     val engineMsg by mainVm.engineMsg.collectAsStateWithLifecycle()
     val playerState by mainVm.playerState.collectAsStateWithLifecycle()
     val sheetTrack by mainVm.sheetTrack.collectAsStateWithLifecycle()
+    val previewTarget by mainVm.previewTarget.collectAsStateWithLifecycle()
+    val serverStatuses by mainVm.serverStatuses.collectAsStateWithLifecycle()
+    val pingingServers by mainVm.pingingServers.collectAsStateWithLifecycle()
+    val qualityPickerState by mainVm.qualityPickerState.collectAsStateWithLifecycle()
+    val nowPlayingOpen by mainVm.nowPlayingOpen.collectAsStateWithLifecycle()
+    val commentsState by mainVm.commentsState.collectAsStateWithLifecycle()
+    val commentsLoading by mainVm.commentsLoading.collectAsStateWithLifecycle()
+    val commentPosting by mainVm.commentPosting.collectAsStateWithLifecycle()
+    val lyricsState by mainVm.lyricsState.collectAsStateWithLifecycle()
+
+    val allServers = remember(settings, serverStatuses) {
+        ServerManager.allServers(settings).map { serverStatuses[it.id] ?: it }
+    }
+    val activeServer = remember(allServers, settings.activeServerId) {
+        allServers.firstOrNull { it.id == settings.activeServerId } ?: allServers.first()
+    }
 
     // Account & Sync state
     val accountProfile by mainVm.accountProfile.collectAsStateWithLifecycle()
@@ -207,9 +247,22 @@ fun YMusicApp(
     val floatingLyricsEnabled by spatialVm.floatingLyricsEnabled.collectAsStateWithLifecycle()
     val floatingNotice by spatialVm.floatingNotice.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { /* Best-effort permission request for progress notifications */ }
+
+    fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !AppNotifications.hasNotificationPermission(context)
+        ) {
+            runCatching { notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        }
+    }
 
     LaunchedEffect(Unit) {
         merge(mainVm.toastMessage, spatialVm.toast).collect { msg ->
@@ -502,7 +555,9 @@ fun YMusicApp(
 
                     MiniPlayerBar(
                         playerState = playerState,
+                        onOpenNowPlaying = mainVm::openNowPlaying,
                         onTogglePlayPause = { mainVm.player.toggle() },
+                        onNext = { mainVm.player.playNext() },
                         onToggleAudioVideoMode = { mainVm.player.switchAudioVideoMode() },
                         onToggleYoutubeVideo = { mainVm.player.toggleYoutubeExpanded() },
                         onStop = { mainVm.player.stop() },
@@ -521,7 +576,7 @@ fun YMusicApp(
                         isLoading = homeLoading,
                         errorMessage = homeError,
                         onRetry = { mainVm.loadHomeFeed(force = true) },
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track -> mainVm.playTrack(track, homeFeed) },
                         onMoreTrack = mainVm::openTrackSheet,
                         showChips = true,
                         selectedChip = homeChip,
@@ -533,7 +588,7 @@ fun YMusicApp(
                         isLoading = trendingLoading,
                         errorMessage = trendingError,
                         onRetry = mainVm::loadTrendingFeed,
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track -> mainVm.playTrack(track, trendingFeed) },
                         onMoreTrack = mainVm::openTrackSheet,
                     )
 
@@ -542,7 +597,7 @@ fun YMusicApp(
                         isLoading = recommendedLoading,
                         errorMessage = recommendedError,
                         onRetry = mainVm.let { vm -> { vm.loadRecommendedFeed() } },
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track -> mainVm.playTrack(track, recommendedFeed) },
                         onMoreTrack = mainVm::openTrackSheet,
                     )
 
@@ -551,7 +606,7 @@ fun YMusicApp(
                         isLoading = topSongsLoading,
                         errorMessage = topSongsError,
                         onRetry = mainVm::loadTopSongsFeed,
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track -> mainVm.playTrack(track, topSongsFeed) },
                         onMoreTrack = mainVm::openTrackSheet,
                     )
 
@@ -571,7 +626,15 @@ fun YMusicApp(
                         onLogoutGoogle = mainVm::logoutAccount,
                         onOpenPlaylist = mainVm::openPlaylist,
                         onCloseSubView = mainVm::closeLibrarySubView,
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track ->
+                            val ctxList = when (librarySubView) {
+                                LibrarySubView.LOCAL -> library
+                                LibrarySubView.LIKED_MUSIC -> likedTracks
+                                LibrarySubView.PLAYLISTS -> selectedPlaylistTracks
+                                LibrarySubView.OVERVIEW -> null
+                            }
+                            mainVm.playTrack(track, ctxList)
+                        },
                         onMoreTrack = mainVm::openTrackSheet,
                     )
 
@@ -581,7 +644,7 @@ fun YMusicApp(
                         isSearching = isSearching,
                         isDemo = isDemoSearch,
                         onQueryChange = mainVm::updateSearchQuery,
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track -> mainVm.playTrack(track, searchResults) },
                         onMoreTrack = mainVm::openTrackSheet,
                     )
 
@@ -590,14 +653,42 @@ fun YMusicApp(
                         scrapeBusy = scrapeBusy,
                         lastScrape = lastScrape,
                         downloadJobs = downloadJobs,
+                        activeServer = activeServer,
+                        onOpenServerMenu = { mainVm.selectTab(AppTab.SERVERS) },
                         onUrlChange = mainVm::updateUrlInput,
                         onScrape = mainVm::scrapeCurrentUrl,
                         onToast = mainVm::emitToast,
-                        onDownloadItem = mainVm::downloadScrapedItem,
+                        onDownloadItem = { item ->
+                            ensureNotificationPermission()
+                            mainVm.downloadScrapedItem(item)
+                        },
+                        onPreviewItem = { item ->
+                            val scrape = lastScrape
+                            if (scrape != null) mainVm.previewMediaItem(scrape, item)
+                        },
+                        onOpenQualityPicker = { scrape ->
+                            mainVm.openQualityPickerForScrape(scrape)
+                        },
+                        onShareScrape = { scrape ->
+                            val tr = MediaScraper.scrapeToTrack(scrape)
+                            if (tr != null) mainVm.shareTrack(tr) else ShareHelper.shareText(context, scrape.rawUrl)
+                        },
                         onSaveToLibrary = mainVm::saveLastScrapeToLibrary,
                         onPlayScrape = mainVm::playLastScrape,
+                        onPreviewJob = mainVm::previewDownloadJob,
+                        onShareJob = mainVm::shareDownloadJob,
                         onRemoveJob = mainVm::removeDownloadJob,
                         onClearFinishedJobs = mainVm::clearFinishedDownloads,
+                    )
+
+                    AppTab.SERVERS -> ServerMenuScreen(
+                        servers = allServers,
+                        activeServerId = settings.activeServerId,
+                        isPinging = pingingServers,
+                        onSelectServer = mainVm::selectServer,
+                        onPingAll = mainVm::pingAllServers,
+                        onAddCustomServer = mainVm::addCustomServer,
+                        onRemoveCustomServer = mainVm::removeCustomServer,
                     )
 
                     AppTab.SPATIAL -> SpatialScreen(
@@ -629,8 +720,13 @@ fun YMusicApp(
                         onLoginGoogle = mainVm::openLoginModal,
                         onSelectHistory = mainVm::openHistoryItem,
                         onClearHistory = mainVm::clearHistory,
-                        onPlayTrack = mainVm::playTrack,
+                        onPlayTrack = { track -> mainVm.playTrack(track, ytHistoryTracks) },
                         onMoreTrack = mainVm::openTrackSheet,
+                    )
+
+                    AppTab.DEBUG -> DebugScreen(
+                        isStandaloneActivity = false,
+                        onToast = mainVm::emitToast,
                     )
 
                     AppTab.SETTINGS -> SettingsScreen(
@@ -658,6 +754,8 @@ fun YMusicApp(
                         onRevertCustomEngine = mainVm::revertCustomEngine,
                         onDownloadFolderChange = mainVm::setDownloadFolder,
                         onYoutubeApiKeyChange = mainVm::setYoutubeApiKey,
+                        onOpenServerMenu = { mainVm.selectTab(AppTab.SERVERS) },
+                        onOpenDebugPanel = { mainVm.selectTab(AppTab.DEBUG) },
                     )
                 }
             }
@@ -678,8 +776,124 @@ fun YMusicApp(
             inLibrary = mainVm.isInLibrary(track.id),
             onDismiss = mainVm::closeTrackSheet,
             onPlay = { mainVm.playTrack(track) },
+            onPlayNext = { mainVm.addToQueueNext(track) },
             onToggleLibrary = { mainVm.toggleLibrary(track) },
-            onDownload = { format -> mainVm.enqueueDownload(track, format) },
+            onOpenQualityPicker = { format ->
+                ensureNotificationPermission()
+                mainVm.openQualityPicker(track, format)
+            },
+            onShare = { mainVm.shareTrack(track) },
+        )
+    }
+
+    qualityPickerState?.let { qp ->
+        QualityPickerDialog(
+            title = qp.title,
+            subtitle = qp.subtitle,
+            thumbnail = qp.thumbnail,
+            allServers = allServers,
+            activeServer = activeServer,
+            resolvedStreams = qp.resolvedStreams,
+            scrapeResult = qp.scrapeResult,
+            isLoading = qp.isLoading,
+            errorMessage = qp.errorMessage,
+            initialFormat = qp.request.initialFormat,
+            onSelectServer = mainVm::switchPickerServer,
+            onOpenServerMenu = { mainVm.selectTab(AppTab.SERVERS) },
+            onRetry = mainVm::retryQualityPicker,
+            onDownloadCandidate = { c ->
+                ensureNotificationPermission()
+                mainVm.downloadStreamCandidate(c)
+            },
+            onPreviewCandidate = mainVm::previewStreamCandidate,
+            onDownloadMediaItem = { item ->
+                ensureNotificationPermission()
+                mainVm.downloadPickerMediaItem(item)
+            },
+            onPreviewMediaItem = mainVm::previewPickerMediaItem,
+            onShare = {
+                val tr = qp.request.track
+                if (tr != null) mainVm.shareTrack(tr) else ShareHelper.shareText(context, qp.request.rawUrl)
+            },
+            onDismiss = mainVm::closeQualityPicker,
+        )
+    }
+
+    if (nowPlayingOpen && playerState.track != null) {
+        NowPlayingSheet(
+            playerState = playerState,
+            inLibrary = mainVm.isInLibrary(playerState.track!!.id),
+            isLoggedIn = accountProfile.isLoggedIn,
+            commentsState = commentsState,
+            commentsLoading = commentsLoading,
+            commentPosting = commentPosting,
+            lyricsState = lyricsState,
+            onDismiss = mainVm::closeNowPlaying,
+            onTogglePlayPause = { mainVm.player.toggle() },
+            onPrevious = { mainVm.player.playPrevious() },
+            onNext = { mainVm.player.playNext() },
+            onSeek = { mainVm.player.seek(it) },
+            onToggleShuffle = { mainVm.player.toggleShuffle() },
+            onCycleRepeat = { mainVm.player.cycleRepeatMode() },
+            onSetSpeedAndPitch = { sp, pt -> mainVm.player.setSpeedAndPitch(sp, pt) },
+            onSetSleepMinutes = { mins ->
+                mainVm.player.setSleepTimerMinutes(mins)
+                mainVm.emitToast("Sleep timer diatur: $mins menit")
+            },
+            onSetSleepAfterTrack = {
+                mainVm.player.setSleepAfterTrack()
+                mainVm.emitToast("Musik berhenti setelah lagu ini")
+            },
+            onCancelSleepTimer = {
+                mainVm.player.cancelSleepTimer()
+                mainVm.emitToast("Sleep timer dimatikan")
+            },
+            onToggleLibrary = mainVm::toggleLibrary,
+            onSwitchAudioVideo = { mainVm.player.switchAudioVideoMode() },
+            onOpen8DStudio = { mainVm.selectTab(AppTab.SPATIAL) },
+            onDownloadQualityPicker = { tr ->
+                ensureNotificationPermission()
+                mainVm.openQualityPicker(tr, null)
+            },
+            onShareTrack = mainVm::shareTrack,
+            onSelectQueueIndex = { mainVm.player.playAtQueueIndex(it) },
+            onRemoveQueueIndex = { mainVm.player.removeFromQueue(it) },
+            onLoadComments = mainVm::loadCommentsForTrack,
+            onLoadMoreComments = mainVm::loadMoreComments,
+            onToggleLikeYoutube = mainVm::toggleLikeCurrentTrack,
+            onSubmitComment = mainVm::submitComment,
+            onLoadLyrics = mainVm::loadLyricsForTrack,
+            onOpenLogin = mainVm::openLoginModal,
+        )
+    }
+
+    previewTarget?.let { target ->
+        UniversalPreviewDialog(
+            target = target,
+            onDismiss = mainVm::closePreview,
+            onDownload = if (target.downloadJobId == null) {
+                {
+                    ensureNotificationPermission()
+                    val fmt = if (target.kind == PreviewKind.AUDIO) DownloadFormat.MP3 else DownloadFormat.MP4
+                    mainVm.openQualityPicker(
+                        Track(
+                            id = target.videoId ?: target.id,
+                            title = target.title,
+                            artist = target.subtitle.ifBlank { "Downloader" },
+                            thumbnail = target.thumbnail,
+                            source = if (!target.videoId.isNullOrBlank()) TrackSource.YOUTUBE else TrackSource.URL,
+                            videoId = target.videoId,
+                            url = target.urlOrUri,
+                        ),
+                        fmt,
+                    )
+                }
+            } else {
+                null
+            },
+            onPlayIn8D = {
+                mainVm.playPreviewTargetIn8D(target)
+            },
         )
     }
 }

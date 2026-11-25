@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name">YMusic Lite</string>
     <string name="tile_8d_label">Spatial 8D</string>
+    <string name="quick_save_title">Quick Save</string>
+    <string name="debug_activity_title">YMusic Debug</string>
     <string name="tab_download">Download</string>
     <string name="tab_search">Search</string>
     <string name="tab_spatial">8D</string>

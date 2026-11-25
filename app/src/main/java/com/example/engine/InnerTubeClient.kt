@@ -6,6 +6,7 @@ import com.example.data.StreamCandidate
 import com.example.data.Track
 import com.example.data.TrackSource
 import com.example.data.YtPlaylist
+import com.example.debug.AppDiagnostics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -247,17 +248,25 @@ object InnerTubeClient {
     suspend fun resolveStreams(
         videoId: String,
         authHeaders: Map<String, String> = emptyMap(),
+        forcedClientName: String? = null,
     ): ResolvedStreams? = withContext(Dispatchers.IO) {
         val cleanId = videoId.trim()
         if (cleanId.isEmpty()) return@withContext null
 
-        val configs = listOf(
+        val allConfigs = listOf(
             PlayerClientConfig("ANDROID_VR", ANDROID_VR_UA, androidVrContext(), useAuth = false),
             PlayerClientConfig("IOS", IOS_UA, iosContext(), useAuth = false),
             PlayerClientConfig("ANDROID", ANDROID_UA, androidContext(), useAuth = false),
             PlayerClientConfig("WEB_REMIX", WEB_REMIX_UA, webRemixContext(), useAuth = true),
         )
+        val configs = if (!forcedClientName.isNullOrBlank()) {
+            val chosen = allConfigs.firstOrNull { it.name == forcedClientName }
+            if (chosen != null) listOf(chosen) + allConfigs.filterNot { it.name == forcedClientName } else allConfigs
+        } else {
+            allConfigs
+        }
 
+        var bestUnverified: ResolvedStreams? = null
         var bestMetadataOnly: ResolvedStreams? = null
 
         for (cfg in configs) {
@@ -275,12 +284,27 @@ object InnerTubeClient {
             }
 
             val resJson = postJson(endpoint, payload, cfg.userAgent, headers) ?: continue
-            val parsed = parsePlayerResponse(cleanId, resJson, cfg.userAgent) ?: continue
+            val parsed = parsePlayerResponse(cleanId, resJson, cfg.userAgent, cfg.name) ?: continue
 
             if (parsed.bestAudio != null || parsed.bestVideo != null) {
-                return@withContext parsed
-            }
-            if (bestMetadataOnly == null && parsed.title.isNotBlank()) {
+                if (bestUnverified == null) bestUnverified = parsed
+
+                val verifiedAudio = parsed.audioStreams.filter { probeStreamPlayable(it.url, it.userAgent) }
+                val verifiedVideo = if (verifiedAudio.isEmpty()) {
+                    parsed.videoStreams.filter { probeStreamPlayable(it.url, it.userAgent) }
+                } else {
+                    parsed.videoStreams
+                }
+                if (verifiedAudio.isNotEmpty() || verifiedVideo.isNotEmpty()) {
+                    return@withContext parsed.copy(
+                        audioStreams = verifiedAudio,
+                        videoStreams = verifiedVideo,
+                        bestAudio = verifiedAudio.firstOrNull() ?: verifiedVideo.firstOrNull { it.hasAudio } ?: verifiedVideo.firstOrNull(),
+                        bestVideo = verifiedVideo.firstOrNull(),
+                    )
+                }
+                AppDiagnostics.warn("InnerTube", "Client ${cfg.name} streams failed playability probe for $cleanId")
+            } else if (bestMetadataOnly == null && parsed.title.isNotBlank()) {
                 bestMetadataOnly = parsed
             }
         }
@@ -294,14 +318,86 @@ object InnerTubeClient {
                     .put("racyCheckOk", true)
                 val resJson = postJson("$YT_API/player?prettyPrint=false", payload, cfg.userAgent, authHeaders)
                     ?: continue
-                val parsed = parsePlayerResponse(cleanId, resJson, cfg.userAgent) ?: continue
-                if (parsed.bestAudio != null || parsed.bestVideo != null) {
-                    return@withContext parsed
+                val parsed = parsePlayerResponse(cleanId, resJson, cfg.userAgent, cfg.name) ?: continue
+                val verifiedAudio = parsed.audioStreams.filter { probeStreamPlayable(it.url, it.userAgent) }
+                if (verifiedAudio.isNotEmpty()) {
+                    return@withContext parsed.copy(
+                        audioStreams = verifiedAudio,
+                        bestAudio = verifiedAudio.firstOrNull(),
+                    )
                 }
             }
         }
 
-        bestMetadataOnly
+        // Failover to Piped mirrors if direct InnerTube clients failed playability probe
+        if (forcedClientName.isNullOrBlank()) {
+            for (mirror in ServerManager.builtInServers.filter { it.kind == com.example.data.ScraperServerKind.PIPED_MIRROR }) {
+                val piped = ServerManager.fetchFromPipedMirror(mirror, cleanId) ?: continue
+                val probeTarget = piped.bestAudio ?: piped.bestVideo
+                if (probeTarget != null && probeStreamPlayable(probeTarget.url, probeTarget.userAgent)) {
+                    AppDiagnostics.info("InnerTube", "Piped mirror fallback succeeded: ${mirror.name}")
+                    return@withContext piped
+                }
+            }
+        }
+
+        bestUnverified ?: bestMetadataOnly
+    }
+
+    fun probeStreamPlayable(url: String, userAgent: String = "YMusic-Lite/0.3.0"): Boolean {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return true
+        return runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", userAgent.ifBlank { "YMusic-Lite/0.3.0" })
+                .header("Range", "bytes=0-63")
+                .build()
+            client.newCall(req).execute().use { res ->
+                if (res.code !in 200..299) return@use false
+                val ct = res.header("Content-Type").orEmpty().lowercase()
+                if (ct.contains("text/html") || ct.contains("application/json") || ct.contains("vnd.yt-ump")) {
+                    return@use false
+                }
+                val source = res.body?.source() ?: return@use false
+                val bytes = ByteArray(64)
+                val read = source.read(bytes, 0, bytes.size)
+                if (read <= 0) return@use false
+                val ascii = String(bytes, 0, read, Charsets.ISO_8859_1).trimStart().lowercase()
+                if (ascii.startsWith("<!doc") || ascii.startsWith("<html") || ascii.startsWith("<head") || ascii.startsWith("{")) {
+                    return@use false
+                }
+                if (ascii.startsWith("#extm3u") || ascii.startsWith("<mpd") || ascii.contains("<mpd")) {
+                    return@use true
+                }
+                if (ct.startsWith("audio/") || ct.startsWith("video/") || ct.contains("mpegurl") || ct.contains("dash+xml")) {
+                    return@use true
+                }
+                hasKnownMediaMagic(bytes, read)
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun hasKnownMediaMagic(bytes: ByteArray, len: Int): Boolean {
+        if (len >= 8) {
+            // MP4/M4A boxes: ftyp, sidx, moof, styp
+            val box = String(bytes, 4, 4, Charsets.ISO_8859_1)
+            if (box in setOf("ftyp", "sidx", "moof", "styp", "moov")) return true
+        }
+        if (len >= 4) {
+            // WebM / Matroska EBML header: 1A 45 DF A3
+            if (bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() && bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()) return true
+            // OggS, fLaC, RIFF, FLV
+            val head4 = String(bytes, 0, 4, Charsets.ISO_8859_1)
+            if (head4 == "OggS" || head4 == "fLaC" || head4 == "RIFF" || head4.startsWith("FLV")) return true
+        }
+        if (len >= 3 && String(bytes, 0, 3, Charsets.ISO_8859_1) == "ID3") return true
+        if (len >= 2) {
+            val b0 = bytes[0].toInt() and 0xFF
+            val b1 = bytes[1].toInt() and 0xFF
+            // MPEG ADTS / MP3 frame sync
+            if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) return true
+        }
+        return false
     }
 
     private fun browseTracks(browseId: String, authHeaders: Map<String, String>): List<Track> = runCatching {
@@ -334,6 +430,7 @@ object InnerTubeClient {
         videoId: String,
         resJson: JSONObject,
         userAgent: String,
+        clientLabel: String,
     ): ResolvedStreams? {
         val details = resJson.optJSONObject("videoDetails")
         val title = details?.optString("title").orEmpty()
@@ -351,10 +448,14 @@ object InnerTubeClient {
             if (adaptive != null) {
                 for (i in 0 until adaptive.length()) {
                     val fmt = adaptive.optJSONObject(i) ?: continue
+                    if (fmt.optString("type").equals("FORMAT_STREAM_TYPE_OTF", ignoreCase = true)) continue
                     val url = fmt.optString("url")
-                    if (!url.startsWith("https://")) continue
+                    if (!url.startsWith("https://") || url.contains("ump=1")) continue
                     val mimeType = fmt.optString("mimeType")
                     val bitrate = fmt.optInt("bitrate", 0)
+                    val sizeBytes = fmt.optString("contentLength").toLongOrNull()
+                        ?: fmt.optLong("contentLength", 0L)
+                    val sizeStr = ServerManager.formatSizeMb(sizeBytes, bitrate, durationSec)
                     when {
                         mimeType.startsWith("audio/") -> {
                             val isMp4 = mimeType.contains("mp4", ignoreCase = true)
@@ -369,20 +470,31 @@ object InnerTubeClient {
                                     qualityLabel = "${ext.uppercase()} $kbps",
                                     isAudio = true,
                                     userAgent = userAgent,
+                                    sizeBytes = sizeBytes,
+                                    formattedSize = sizeStr,
+                                    hasAudio = true,
+                                    clientSourceLabel = clientLabel,
                                 ),
                             )
                         }
-                        mimeType.startsWith("video/mp4") -> {
-                            val quality = fmt.optString("qualityLabel").ifBlank { "MP4" }
+                        mimeType.startsWith("video/") -> {
+                            val ext = if (mimeType.contains("webm", ignoreCase = true)) "webm" else "mp4"
+                            val fps = fmt.optInt("fps", 0)
+                            val quality = fmt.optString("qualityLabel").ifBlank { ext.uppercase() }
                             videoCandidates.add(
                                 StreamCandidate(
                                     url = url,
                                     mimeType = mimeType,
-                                    ext = "mp4",
+                                    ext = ext,
                                     bitrate = bitrate,
                                     qualityLabel = "$quality (video-only)",
                                     isAudio = false,
                                     userAgent = userAgent,
+                                    sizeBytes = sizeBytes,
+                                    formattedSize = sizeStr,
+                                    fps = fps,
+                                    hasAudio = false,
+                                    clientSourceLabel = clientLabel,
                                 ),
                             )
                         }
@@ -395,9 +507,13 @@ object InnerTubeClient {
                 for (i in 0 until progressive.length()) {
                     val fmt = progressive.optJSONObject(i) ?: continue
                     val url = fmt.optString("url")
-                    if (!url.startsWith("https://")) continue
+                    if (!url.startsWith("https://") || url.contains("ump=1")) continue
                     val mimeType = fmt.optString("mimeType")
                     val bitrate = fmt.optInt("bitrate", 0)
+                    val fps = fmt.optInt("fps", 0)
+                    val sizeBytes = fmt.optString("contentLength").toLongOrNull()
+                        ?: fmt.optLong("contentLength", 0L)
+                    val sizeStr = ServerManager.formatSizeMb(sizeBytes, bitrate, durationSec)
                     val quality = fmt.optString("qualityLabel").ifBlank { "MP4" }
                     videoCandidates.add(
                         StreamCandidate(
@@ -405,12 +521,34 @@ object InnerTubeClient {
                             mimeType = mimeType,
                             ext = "mp4",
                             bitrate = bitrate,
-                            qualityLabel = quality,
+                            qualityLabel = "$quality (Video+Audio)",
                             isAudio = false,
                             userAgent = userAgent,
+                            sizeBytes = sizeBytes,
+                            formattedSize = sizeStr,
+                            fps = fps,
+                            hasAudio = true,
+                            clientSourceLabel = clientLabel,
                         ),
                     )
                 }
+            }
+
+            val hlsUrl = streamingData.optString("hlsManifestUrl")
+            if (hlsUrl.startsWith("https://")) {
+                videoCandidates.add(
+                    StreamCandidate(
+                        url = hlsUrl,
+                        mimeType = "application/x-mpegURL",
+                        ext = "m3u8",
+                        bitrate = 0,
+                        qualityLabel = "HLS Stream",
+                        isAudio = false,
+                        userAgent = userAgent,
+                        hasAudio = true,
+                        clientSourceLabel = clientLabel,
+                    ),
+                )
             }
         }
 
@@ -418,7 +556,7 @@ object InnerTubeClient {
             compareByDescending<StreamCandidate> { it.ext == "m4a" }.thenByDescending { it.bitrate },
         )
         val sortedVideo = videoCandidates.sortedWith(
-            compareByDescending<StreamCandidate> { !it.qualityLabel.contains("video-only") }
+            compareByDescending<StreamCandidate> { it.hasAudio }
                 .thenByDescending { it.bitrate },
         )
 
@@ -432,6 +570,7 @@ object InnerTubeClient {
             videoStreams = sortedVideo,
             bestAudio = sortedAudio.firstOrNull(),
             bestVideo = sortedVideo.firstOrNull(),
+            sourceServerName = clientLabel,
         )
     }
 

@@ -68,6 +68,7 @@ class Universal8DService : Service() {
         super.onCreate()
         MixerRepository.init(this)
         createChannel()
+        com.example.debug.AppDiagnostics.setServiceRunning("Universal8DService", true)
         scope.launch {
             MixerRepository.settings
                 .map { listOf(it.pathId, it.customRaw, it.smoothLevel, it.lissajousFreqX, it.lissajousFreqZ, it.lissajousPhase) }
@@ -258,6 +259,7 @@ class Universal8DService : Service() {
     override fun onDestroy() {
         stopCaptureOnly()
         scope.cancel()
+        com.example.debug.AppDiagnostics.setServiceRunning("Universal8DService", false)
         super.onDestroy()
     }
 
@@ -271,10 +273,10 @@ class Universal8DService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val appIntent = packageManager.getLaunchIntentForPackage(packageName)
-            ?: Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(packageName)
-        val openIntent = PendingIntent.getActivity(
-            this, 0, appIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        val openIntent = com.example.notify.AppNotifications.createMainRoutePendingIntent(
+            context = this,
+            route = com.example.notify.AppNotifications.ROUTE_SPATIAL,
+            requestCode = 8081,
         )
         val stopIntent = PendingIntent.getService(
             this, 1, Intent(this, Universal8DService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE
@@ -282,7 +284,7 @@ class Universal8DService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("Laguku Universal 8D Aktif")
-            .setContentText("Memproses audio YouTube, TikTok, Game & aplikasi lain secara real-time.")
+            .setContentText("Ketuk untuk buka Spatial 8D Studio.")
             .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Matikan", stopIntent)
             .setOngoing(true)

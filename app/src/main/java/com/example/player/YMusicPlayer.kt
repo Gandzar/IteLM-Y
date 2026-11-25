@@ -5,18 +5,23 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
-import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.example.data.RepeatMode
 import com.example.data.ResolvedStreams
 import com.example.data.Track
 import com.example.data.TrackSource
+import com.example.debug.AppDiagnostics
 import com.example.engine.InnerTubeClient
 import com.example.engine.MediaScraper
 import dev.bagja.spatialaudio.audio.FloatingBubbleService
@@ -52,6 +57,14 @@ data class PlayerState(
     val canSwitchToVideo: Boolean = false,
     val audioCodecLabel: String = "",
     val resumeSeekSec: Float = 0f,
+    val queue: List<Track> = emptyList(),
+    val currentIndex: Int = -1,
+    val shuffleEnabled: Boolean = false,
+    val repeatMode: RepeatMode = RepeatMode.OFF,
+    val playbackSpeed: Float = 1.0f,
+    val playbackPitch: Float = 1.0f,
+    val sleepTimerRemainingSec: Long? = null,
+    val sleepAfterCurrentTrack: Boolean = false,
 )
 
 @OptIn(UnstableApi::class)
@@ -66,8 +79,12 @@ class YMusicPlayer(
     private var exoPlayer: ExoPlayer? = null
     private var progressJob: Job? = null
     private var resolveJob: Job? = null
+    private var sleepTimerJob: Job? = null
     private var cachedResolved: ResolvedStreams? = null
     private var pendingSeekSec: Float = 0f
+    private var activeStreamUrl: String = ""
+    private val failedStreamUrls = hashSetOf<String>()
+    private var retriedFreshResolve: Boolean = false
 
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
@@ -124,7 +141,7 @@ class YMusicPlayer(
                                 seekTo(targetMs)
                             }
                             if (playbackState == Player.STATE_ENDED) {
-                                _state.update { it.copy(playing = false, currentTimeSec = 0f, durationSec = dur) }
+                                handleTrackCompleted(dur)
                             } else {
                                 _state.update { it.copy(durationSec = dur) }
                             }
@@ -133,10 +150,41 @@ class YMusicPlayer(
 
                     override fun onPlayerError(error: PlaybackException) {
                         val s = _state.value
-                        val videoId = s.track?.videoId
-                        if (s.mode == PlayerMode.AUDIO && !videoId.isNullOrBlank()) {
-                            // Automatic fallback to in-app YouTube IFrame Video Player
-                            fallbackToYoutubeIframe(s.track, s.currentTimeSec)
+                        val track = s.track
+                        val videoId = track?.videoId
+                        AppDiagnostics.warn("Player", "Playback error (${error.errorCodeName}) for ${track?.title}: ${error.message}")
+                        if (activeStreamUrl.isNotBlank()) {
+                            failedStreamUrls.add(activeStreamUrl)
+                        }
+                        if (s.mode == PlayerMode.AUDIO && track != null && !videoId.isNullOrBlank()) {
+                            val nextCandidate = cachedResolved
+                                ?.takeIf { it.videoId == videoId }
+                                ?.let { res ->
+                                    (res.audioStreams + res.videoStreams.filter { it.hasAudio })
+                                        .firstOrNull { it.url !in failedStreamUrls }
+                                }
+                            if (nextCandidate != null) {
+                                AppDiagnostics.info("Player", "Retrying alternative stream: ${nextCandidate.qualityLabel}")
+                                playAudioUri(
+                                    track = track.copy(url = nextCandidate.url),
+                                    streamUrl = nextCandidate.url,
+                                    userAgent = nextCandidate.userAgent.ifBlank { "YMusic-Lite/0.3.0" },
+                                    codecLabel = "${nextCandidate.qualityLabel} · 8D DSP",
+                                    canSwitchToVideo = true,
+                                    seekToSec = s.currentTimeSec,
+                                    queue = s.queue,
+                                    index = s.currentIndex,
+                                )
+                                return
+                            }
+                            if (!retriedFreshResolve) {
+                                retriedFreshResolve = true
+                                cachedResolved = null
+                                AppDiagnostics.info("Player", "Refreshing streams for $videoId after playback error")
+                                resolveAndPlayAudio(track, videoId, startSec = s.currentTimeSec, queue = s.queue, index = s.currentIndex)
+                                return
+                            }
+                            fallbackToYoutubeIframe(track, s.currentTimeSec)
                         } else {
                             _state.update { it.copy(playing = false, resolvingStream = false) }
                         }
@@ -145,68 +193,148 @@ class YMusicPlayer(
             }
     }
 
-    fun play(track: Track) {
+    private fun handleTrackCompleted(dur: Float) {
+        val s = _state.value
+        if (s.sleepAfterCurrentTrack) {
+            AppDiagnostics.info("Player", "Sleep timer triggered at end of track")
+            _state.update {
+                it.copy(
+                    playing = false,
+                    currentTimeSec = 0f,
+                    durationSec = dur,
+                    sleepAfterCurrentTrack = false,
+                    sleepTimerRemainingSec = null,
+                )
+            }
+            exoPlayer?.seekTo(0L)
+            exoPlayer?.pause()
+            BackgroundPlaybackService.sync(appContext)
+            return
+        }
+        when (s.repeatMode) {
+            RepeatMode.ONE -> {
+                exoPlayer?.seekTo(0L)
+                exoPlayer?.play()
+            }
+            RepeatMode.ALL, RepeatMode.OFF -> {
+                val advanced = playNextInternal(fromAutoComplete = true)
+                if (!advanced) {
+                    _state.update { it.copy(playing = false, currentTimeSec = 0f, durationSec = dur) }
+                }
+            }
+        }
+    }
+
+    fun play(track: Track, queueContext: List<Track>? = null) {
+        val currentState = _state.value
+        val nextQueue: List<Track>
+        val nextIndex: Int
+        if (queueContext != null && queueContext.isNotEmpty()) {
+            val playable = queueContext.filter { !it.isMix || !it.videoId.isNullOrBlank() || !it.url.isNullOrBlank() }
+                .ifEmpty { listOf(track) }
+            nextQueue = if (playable.any { it.id == track.id }) playable else listOf(track) + playable
+            nextIndex = nextQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+        } else if (currentState.queue.any { it.id == track.id }) {
+            nextQueue = currentState.queue
+            nextIndex = nextQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+        } else {
+            nextQueue = listOf(track)
+            nextIndex = 0
+        }
+
+        playInternal(
+            track = track,
+            queue = nextQueue,
+            index = nextIndex,
+        )
+    }
+
+    private fun playInternal(track: Track, queue: List<Track>, index: Int) {
         resolveJob?.cancel()
         progressJob?.cancel()
         exoPlayer?.pause()
         exoPlayer?.clearMediaItems()
         pendingSeekSec = 0f
+        activeStreamUrl = ""
+        failedStreamUrls.clear()
+        retriedFreshResolve = false
 
+        AppDiagnostics.info("Player", "Play requested: ${track.title} (queue ${index + 1}/${queue.size})")
         SpatialHostBridge.currentTitle.value = track.title
         SpatialHostBridge.currentLyrics.value = track.artist
         if (MixerRepository.floatingLyricsEnabled.value) {
             FloatingBubbleService.syncLyrics(appContext)
         }
 
-        val directUrl = track.url?.takeIf { it.isNotBlank() && MediaScraper.isDirectMediaUrl(it) }
+        val rawUrl = track.url?.trim().orEmpty()
+        val isLocalUri = rawUrl.startsWith("/") ||
+            rawUrl.startsWith("content://", ignoreCase = true) ||
+            rawUrl.startsWith("file://", ignoreCase = true)
         val hasVideoId = !track.videoId.isNullOrBlank()
+        val directUrl = rawUrl.takeIf {
+            it.isNotBlank() && MediaScraper.isDirectMediaUrl(it) && (isLocalUri || track.source != TrackSource.YOUTUBE || !hasVideoId)
+        }
 
         if (directUrl != null) {
             playAudioUri(
                 track = track,
                 streamUrl = directUrl,
                 userAgent = "YMusic-Lite/0.3.0",
-                codecLabel = "Direct · 8D DSP",
+                codecLabel = if (isLocalUri) "Lokal · 8D DSP" else "Direct · 8D DSP",
                 canSwitchToVideo = hasVideoId,
                 seekToSec = 0f,
+                queue = queue,
+                index = index,
             )
             return
         }
 
         if (track.source == TrackSource.YOUTUBE && hasVideoId) {
             val vid = track.videoId!!
-            _state.value = PlayerState(
-                track = track,
-                playing = false,
-                currentTimeSec = 0f,
-                durationSec = track.duration.toFloat(),
-                mode = PlayerMode.AUDIO,
-                youtubeExpanded = false,
-                resolvingStream = true,
-                canSwitchToVideo = true,
-                audioCodecLabel = "Ekstrak audio…",
-            )
-            resolveAndPlayAudio(track, vid, startSec = 0f)
+            _state.update { prev ->
+                prev.copy(
+                    track = track,
+                    playing = false,
+                    currentTimeSec = 0f,
+                    durationSec = track.duration.toFloat(),
+                    mode = PlayerMode.AUDIO,
+                    youtubeExpanded = false,
+                    resolvingStream = true,
+                    canSwitchToVideo = true,
+                    audioCodecLabel = "Ekstrak audio…",
+                    queue = queue,
+                    currentIndex = index,
+                )
+            }
+            resolveAndPlayAudio(track, vid, startSec = 0f, queue = queue, index = index)
             return
         }
 
-        val fallbackUrl = track.url
-        if (!fallbackUrl.isNullOrBlank()) {
+        if (rawUrl.isNotBlank() && MediaScraper.isDirectMediaUrl(rawUrl)) {
             playAudioUri(
                 track = track,
-                streamUrl = fallbackUrl,
+                streamUrl = rawUrl,
                 userAgent = "YMusic-Lite/0.3.0",
                 codecLabel = "Audio · 8D DSP",
-                canSwitchToVideo = false,
+                canSwitchToVideo = hasVideoId,
                 seekToSec = 0f,
+                queue = queue,
+                index = index,
             )
             return
         }
 
-        _state.value = PlayerState(track = track, mode = PlayerMode.NONE)
+        AppDiagnostics.warn("Player", "Skipping non-media URL for playback: ${rawUrl.take(80)}")
+        _state.update { it.copy(track = track, mode = PlayerMode.NONE, playing = false, resolvingStream = false, queue = queue, currentIndex = index) }
     }
 
-    private fun resolveAndPlayAudio(track: Track, videoId: String, startSec: Float) {
+    private fun resolveAndPlayAudio(
+        track: Track,
+        videoId: String,
+        startSec: Float,
+        queue: List<Track>,
+        index: Int,
+    ) {
         resolveJob?.cancel()
         resolveJob = scope.launch {
             val cached = cachedResolved?.takeIf { it.videoId == videoId }
@@ -218,16 +346,19 @@ class YMusicPlayer(
                 cachedResolved = resolved
             }
 
-            // Ensure user hasn't switched track while resolving
             if (_state.value.track?.id != track.id) return@launch
 
-            val bestAudio = resolved?.bestAudio
+            val bestAudio = resolved?.let { res ->
+                (res.audioStreams + res.videoStreams.filter { it.hasAudio })
+                    .firstOrNull { it.url !in failedStreamUrls }
+            }
             if (bestAudio != null) {
                 val enrichedTrack = track.copy(
-                    duration = if (track.duration > 0) track.duration else (resolved.durationSec),
+                    duration = if (track.duration > 0) track.duration else resolved.durationSec,
                     thumbnail = track.thumbnail.ifBlank { resolved.thumbnail },
                     url = bestAudio.url,
                 )
+                val updatedQueue = queue.mapIndexed { idx, t -> if (idx == index) enrichedTrack else t }
                 playAudioUri(
                     track = enrichedTrack,
                     streamUrl = bestAudio.url,
@@ -235,6 +366,8 @@ class YMusicPlayer(
                     codecLabel = "${bestAudio.qualityLabel} · 8D DSP",
                     canSwitchToVideo = true,
                     seekToSec = startSec,
+                    queue = updatedQueue,
+                    index = index,
                 )
             } else {
                 fallbackToYoutubeIframe(track, startSec)
@@ -249,9 +382,12 @@ class YMusicPlayer(
         codecLabel: String,
         canSwitchToVideo: Boolean,
         seekToSec: Float,
+        queue: List<Track>,
+        index: Int,
     ) {
         pendingSeekSec = seekToSec.coerceAtLeast(0f)
-        _state.value = PlayerState(
+        val prev = _state.value
+        _state.value = prev.copy(
             track = track,
             playing = true,
             currentTimeSec = seekToSec,
@@ -261,20 +397,41 @@ class YMusicPlayer(
             resolvingStream = false,
             canSwitchToVideo = canSwitchToVideo,
             audioCodecLabel = codecLabel,
+            queue = queue,
+            currentIndex = index,
         )
 
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
+        activeStreamUrl = streamUrl
+        val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent)
             .setAllowCrossProtocolRedirects(true)
+        val dataSourceFactory = DefaultDataSource.Factory(appContext, httpFactory)
 
-        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
-            .createMediaSource(MediaItem.fromUri(streamUrl))
+        val uri = if (streamUrl.startsWith("/")) {
+            android.net.Uri.fromFile(java.io.File(streamUrl))
+        } else {
+            android.net.Uri.parse(streamUrl)
+        }
+        val mediaItemBuilder = MediaItem.Builder().setUri(uri)
+        val lowerUrl = streamUrl.lowercase()
+        when {
+            lowerUrl.contains(".m3u8") || lowerUrl.contains("hls_playlist") ->
+                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            lowerUrl.contains(".mpd") ->
+                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+        }
+
+        val mediaSource = DefaultMediaSourceFactory(dataSourceFactory)
+            .createMediaSource(mediaItemBuilder.build())
 
         exoPlayer?.apply {
+            playbackParameters = PlaybackParameters(prev.playbackSpeed, prev.playbackPitch)
             setMediaSource(mediaSource)
             prepare()
             playWhenReady = true
         }
+        AppDiagnostics.info("Player", "Streaming audio ($codecLabel): ${track.title}")
+        BackgroundPlaybackService.sync(appContext)
         startAudioProgressPolling()
     }
 
@@ -282,18 +439,20 @@ class YMusicPlayer(
         progressJob?.cancel()
         exoPlayer?.pause()
         exoPlayer?.clearMediaItems()
-        _state.value = PlayerState(
-            track = track,
-            playing = true,
-            currentTimeSec = startSec,
-            durationSec = track.duration.toFloat(),
-            mode = PlayerMode.YOUTUBE_IFRAME,
-            youtubeExpanded = true,
-            resolvingStream = false,
-            canSwitchToVideo = true,
-            audioCodecLabel = "Mode Video",
-            resumeSeekSec = startSec,
-        )
+        _state.update { prev ->
+            prev.copy(
+                track = track,
+                playing = true,
+                currentTimeSec = startSec,
+                durationSec = track.duration.toFloat(),
+                mode = PlayerMode.YOUTUBE_IFRAME,
+                youtubeExpanded = true,
+                resolvingStream = false,
+                canSwitchToVideo = true,
+                audioCodecLabel = "Mode Video",
+                resumeSeekSec = startSec,
+            )
+        }
     }
 
     fun switchAudioVideoMode() {
@@ -324,8 +483,137 @@ class YMusicPlayer(
                 resolvingStream = true,
                 audioCodecLabel = "Beralih ke Audio 8D…",
             )
-            resolveAndPlayAudio(track, videoId, startSec = pos)
+            resolveAndPlayAudio(track, videoId, startSec = pos, queue = s.queue, index = s.currentIndex)
         }
+    }
+
+    fun playNext(): Boolean = playNextInternal(fromAutoComplete = false)
+
+    private fun playNextInternal(fromAutoComplete: Boolean): Boolean {
+        val s = _state.value
+        if (s.queue.isEmpty()) return false
+        val nextIdx = when {
+            s.shuffleEnabled && s.queue.size > 1 -> {
+                val pool = s.queue.indices.filter { it != s.currentIndex }
+                pool.random()
+            }
+            s.currentIndex + 1 < s.queue.size -> s.currentIndex + 1
+            s.repeatMode == RepeatMode.ALL || !fromAutoComplete -> 0
+            else -> -1
+        }
+        if (nextIdx !in s.queue.indices) return false
+        playInternal(s.queue[nextIdx], s.queue, nextIdx)
+        return true
+    }
+
+    fun playPrevious(): Boolean {
+        val s = _state.value
+        if (s.queue.isEmpty()) return false
+        if (s.currentTimeSec > 4f) {
+            seek(0f)
+            return true
+        }
+        val prevIdx = when {
+            s.currentIndex - 1 >= 0 -> s.currentIndex - 1
+            s.repeatMode == RepeatMode.ALL || s.queue.size > 1 -> s.queue.lastIndex
+            else -> 0
+        }
+        if (prevIdx !in s.queue.indices) return false
+        playInternal(s.queue[prevIdx], s.queue, prevIdx)
+        return true
+    }
+
+    fun playAtQueueIndex(index: Int) {
+        val s = _state.value
+        if (index !in s.queue.indices) return
+        playInternal(s.queue[index], s.queue, index)
+    }
+
+    fun addToQueueNext(track: Track) {
+        val s = _state.value
+        if (s.track == null || s.queue.isEmpty()) {
+            play(track)
+            return
+        }
+        val filtered = s.queue.filterNot { it.id == track.id }
+        val currentId = s.track.id
+        val curIdx = filtered.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+        val insertPos = (curIdx + 1).coerceAtMost(filtered.size)
+        val updated = filtered.toMutableList().apply { add(insertPos, track) }
+        _state.update { it.copy(queue = updated, currentIndex = curIdx) }
+    }
+
+    fun removeFromQueue(index: Int) {
+        val s = _state.value
+        if (index !in s.queue.indices || s.queue.size <= 1) return
+        val updated = s.queue.toMutableList().apply { removeAt(index) }
+        val nextCur = when {
+            index < s.currentIndex -> (s.currentIndex - 1).coerceAtLeast(0)
+            index == s.currentIndex -> s.currentIndex.coerceAtMost(updated.lastIndex)
+            else -> s.currentIndex
+        }
+        _state.update { it.copy(queue = updated, currentIndex = nextCur) }
+        if (index == s.currentIndex && nextCur in updated.indices) {
+            playInternal(updated[nextCur], updated, nextCur)
+        }
+    }
+
+    fun toggleShuffle() {
+        _state.update { it.copy(shuffleEnabled = !it.shuffleEnabled) }
+    }
+
+    fun cycleRepeatMode() {
+        _state.update { st ->
+            val next = when (st.repeatMode) {
+                RepeatMode.OFF -> RepeatMode.ALL
+                RepeatMode.ALL -> RepeatMode.ONE
+                RepeatMode.ONE -> RepeatMode.OFF
+            }
+            st.copy(repeatMode = next)
+        }
+    }
+
+    fun setSpeedAndPitch(speed: Float, pitch: Float) {
+        val sp = speed.coerceIn(0.5f, 2.0f)
+        val pt = pitch.coerceIn(0.6f, 1.5f)
+        _state.update { it.copy(playbackSpeed = sp, playbackPitch = pt) }
+        exoPlayer?.playbackParameters = PlaybackParameters(sp, pt)
+    }
+
+    fun setSleepTimerMinutes(minutes: Int) {
+        sleepTimerJob?.cancel()
+        if (minutes <= 0) {
+            cancelSleepTimer()
+            return
+        }
+        val totalSec = minutes * 60L
+        _state.update { it.copy(sleepTimerRemainingSec = totalSec, sleepAfterCurrentTrack = false) }
+        AppDiagnostics.info("Player", "Sleep timer set for $minutes min")
+        sleepTimerJob = scope.launch {
+            var remaining = totalSec
+            while (remaining > 0 && isActive) {
+                delay(1000L)
+                remaining--
+                _state.update { it.copy(sleepTimerRemainingSec = remaining) }
+            }
+            if (isActive) {
+                AppDiagnostics.info("Player", "Sleep timer expired -> pausing playback")
+                pause()
+                _state.update { it.copy(sleepTimerRemainingSec = null, sleepAfterCurrentTrack = false) }
+                BackgroundPlaybackService.sync(appContext)
+            }
+        }
+    }
+
+    fun setSleepAfterTrack() {
+        sleepTimerJob?.cancel()
+        _state.update { it.copy(sleepTimerRemainingSec = null, sleepAfterCurrentTrack = true) }
+        AppDiagnostics.info("Player", "Sleep timer set for end of current track")
+    }
+
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        _state.update { it.copy(sleepTimerRemainingSec = null, sleepAfterCurrentTrack = false) }
     }
 
     private fun startAudioProgressPolling() {
@@ -388,6 +676,7 @@ class YMusicPlayer(
     fun stop() {
         resolveJob?.cancel()
         progressJob?.cancel()
+        sleepTimerJob?.cancel()
         exoPlayer?.pause()
         exoPlayer?.clearMediaItems()
         _state.value = PlayerState()
@@ -398,6 +687,7 @@ class YMusicPlayer(
     fun release() {
         resolveJob?.cancel()
         progressJob?.cancel()
+        sleepTimerJob?.cancel()
         exoPlayer?.release()
         exoPlayer = null
         SpatialHostBridge.onTogglePlayback = null

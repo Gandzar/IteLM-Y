@@ -3,6 +3,8 @@ package com.example.ui.components
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
@@ -10,19 +12,24 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.view.View
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -30,11 +37,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,12 +53,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.auth.YouTubeAuthManager
+import com.example.debug.AppDiagnostics
 import com.example.ui.theme.YtBg
 import com.example.ui.theme.YtCard
 import com.example.ui.theme.YtDivider
@@ -80,13 +92,17 @@ fun GoogleLoginDialog(
     onError: (String) -> Unit,
 ) {
     var currentUrl by remember { mutableStateOf("accounts.google.com") }
+    var lastLoadedUrl by remember { mutableStateOf(LOGIN_START_URL) }
     var isLoading by remember { mutableStateOf(true) }
     var completed by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var useSoftwareLayer by remember { mutableStateOf(isVirtualRenderDevice()) }
+    var crashCount by remember { mutableIntStateOf(0) }
+    var webViewEpoch by remember { mutableIntStateOf(0) }
+    var rendererCrashedOut by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose {
-            webViewRef?.destroy()
             webViewRef = null
         }
     }
@@ -160,7 +176,7 @@ fun GoogleLoginDialog(
                     }
                 }
                 HorizontalDivider(color = YtDivider)
-                if (isLoading) {
+                if (isLoading && !rendererCrashedOut) {
                     LinearProgressIndicator(
                         modifier = Modifier.fillMaxWidth(),
                         color = YtOrange,
@@ -168,73 +184,134 @@ fun GoogleLoginDialog(
                     )
                 }
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    AndroidView(
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                val cm = CookieManager.getInstance()
-                                cm.setAcceptCookie(true)
-                                cm.setAcceptThirdPartyCookies(this, true)
-
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.userAgentString = MOBILE_CHROME_UA
-                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                                settings.useWideViewPort = true
-                                settings.loadWithOverviewMode = true
-
-                                webChromeClient = WebChromeClient()
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView?,
-                                        request: WebResourceRequest?,
-                                    ): Boolean {
-                                        val uri = request?.url ?: return true
-                                        if (uri.scheme != "https" || !isTrustedAuthHost(uri.host)) {
-                                            return true
+                    if (rendererCrashedOut) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(24.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                text = "Halaman login WebView terhenti karena batas memori/renderer perangkat.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = YtTextPrimary,
+                                textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    useSoftwareLayer = true
+                                    crashCount = 0
+                                    rendererCrashedOut = false
+                                    isLoading = true
+                                    webViewEpoch++
+                                },
+                                border = BorderStroke(1.dp, YtOrange),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, tint = YtOrange)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Muat Ulang Login", color = YtOrange, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    } else {
+                        key(webViewEpoch) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        if (useSoftwareLayer) {
+                                            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                                         }
-                                        return false
-                                    }
-
-                                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                        isLoading = true
-                                        url?.let {
-                                            currentUrl = runCatching { Uri.parse(it).host }.getOrNull() ?: it
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                            setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
                                         }
-                                    }
+                                        val cm = CookieManager.getInstance()
+                                        cm.setAcceptCookie(true)
+                                        cm.setAcceptThirdPartyCookies(this, true)
 
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        isLoading = false
-                                        val host = url?.let { runCatching { Uri.parse(it).host }.getOrNull() }?.lowercase()
-                                        if (!completed && (host == "music.youtube.com" || host == "www.youtube.com" || host == "m.youtube.com")) {
-                                            val cookies = YouTubeAuthManager.collectCookiesFromCookieManager()
-                                            if (YouTubeAuthManager.hasAuthCookieInString(cookies)) {
-                                                completed = true
-                                                onCookiesCaptured(cookies)
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        settings.userAgentString = MOBILE_CHROME_UA
+                                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                                        settings.useWideViewPort = true
+                                        settings.loadWithOverviewMode = true
+                                        settings.setSupportMultipleWindows(false)
+
+                                        webChromeClient = WebChromeClient()
+                                        webViewClient = object : WebViewClient() {
+                                            override fun shouldOverrideUrlLoading(
+                                                view: WebView?,
+                                                request: WebResourceRequest?,
+                                            ): Boolean {
+                                                val uri = request?.url ?: return true
+                                                if (uri.scheme != "https" || !isTrustedAuthHost(uri.host)) {
+                                                    return true
+                                                }
+                                                return false
+                                            }
+
+                                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                                isLoading = true
+                                                url?.let {
+                                                    lastLoadedUrl = it
+                                                    currentUrl = runCatching { Uri.parse(it).host }.getOrNull() ?: it
+                                                }
+                                            }
+
+                                            override fun onPageFinished(view: WebView?, url: String?) {
+                                                isLoading = false
+                                                val host = url?.let { runCatching { Uri.parse(it).host }.getOrNull() }?.lowercase()
+                                                if (!completed && (host == "music.youtube.com" || host == "www.youtube.com" || host == "m.youtube.com")) {
+                                                    val cookies = YouTubeAuthManager.collectCookiesFromCookieManager()
+                                                    if (YouTubeAuthManager.hasAuthCookieInString(cookies)) {
+                                                        completed = true
+                                                        onCookiesCaptured(cookies)
+                                                    }
+                                                }
+                                            }
+
+                                            override fun onRenderProcessGone(
+                                                view: WebView?,
+                                                detail: RenderProcessGoneDetail?,
+                                            ): Boolean {
+                                                isLoading = false
+                                                val didCrash = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                    detail?.didCrash() == true
+                                                } else {
+                                                    true
+                                                }
+                                                AppDiagnostics.warn(
+                                                    "WebView",
+                                                    "GoogleLogin renderer gone (didCrash=$didCrash, crashCount=$crashCount)",
+                                                )
+                                                if (webViewRef == view) {
+                                                    webViewRef = null
+                                                }
+                                                safelyDestroyWebView(view)
+                                                useSoftwareLayer = true
+                                                if (crashCount == 0) {
+                                                    crashCount = 1
+                                                    webViewEpoch++
+                                                    onError("Memuat ulang halaman login dalam mode aman")
+                                                } else {
+                                                    rendererCrashedOut = true
+                                                }
+                                                return true
                                             }
                                         }
+                                        loadUrl(lastLoadedUrl)
+                                        webViewRef = this
                                     }
-
-                                    override fun onRenderProcessGone(
-                                        view: WebView?,
-                                        detail: RenderProcessGoneDetail?,
-                                    ): Boolean {
-                                        isLoading = false
-                                        view?.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                                        onError("Renderer WebView dimuat ulang")
-                                        return true
-                                    }
-                                }
-                                loadUrl(LOGIN_START_URL)
-                                webViewRef = this
-                            }
-                        },
-                        onRelease = { wv ->
-                            wv.stopLoading()
-                            wv.destroy()
-                            if (webViewRef == wv) webViewRef = null
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                                },
+                                onRelease = { wv ->
+                                    if (webViewRef == wv) webViewRef = null
+                                    safelyDestroyWebView(wv)
+                                },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
             }
         }

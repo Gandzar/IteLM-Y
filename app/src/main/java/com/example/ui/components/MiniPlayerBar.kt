@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.OndemandVideo
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,7 +56,9 @@ import com.example.ui.theme.YtTextSecondary
 @Composable
 fun MiniPlayerBar(
     playerState: PlayerState,
+    onOpenNowPlaying: () -> Unit,
     onTogglePlayPause: () -> Unit,
+    onNext: () -> Unit,
     onToggleAudioVideoMode: () -> Unit,
     onToggleYoutubeVideo: () -> Unit,
     onStop: () -> Unit,
@@ -103,10 +106,9 @@ fun MiniPlayerBar(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = playerState.mode == PlayerMode.YOUTUBE_IFRAME) {
-                                onToggleYoutubeVideo()
-                            }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .clickable { onOpenNowPlaying() }
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .testTag("mini_player_bar"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -212,6 +214,21 @@ fun MiniPlayerBar(
                                     imageVector = if (playerState.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
                                     contentDescription = if (playerState.playing) "Jeda" else "Putar",
                                     tint = YtOrange,
+                                )
+                            }
+                        }
+
+                        if (playerState.queue.size > 1) {
+                            IconButton(
+                                onClick = onNext,
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("player_next_btn"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SkipNext,
+                                    contentDescription = "Lagu berikutnya",
+                                    tint = YtTextPrimary,
                                 )
                             }
                         }
