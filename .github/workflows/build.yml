@@ -28,6 +28,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Mengganti paket default 'tools' yang sudah dihapus Google dengan paket modern
+          packages: 'platform-tools'
 
       - name: Prepare signing keystore
         run: |
@@ -45,7 +48,18 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Build Debug & Release APKs
-        run: gradle assembleDebug assembleRelease --no-daemon
+        # Output build disimpan ke build.log sekaligus ditampilkan di terminal
+        run: gradle assembleDebug assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Upload Build & Error Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Failure-Logs
+          path: |
+            build.log
+            app/build/reports/
+          if-no-files-found: ignore
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
