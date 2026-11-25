@@ -1,0 +1,8 @@
+{
+  "name": "YMusic Lite",
+  "description": "Universal media downloader, YouTube music search & player, and Kruzen 8D spatial audio DSP studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
